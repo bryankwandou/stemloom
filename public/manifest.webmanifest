@@ -1,0 +1,32 @@
+{
+  "name": "Stemloom — Audio Editor",
+  "short_name": "Stemloom",
+  "description": "A multitrack audio editor that decodes, edits, and renders entirely on your own machine.",
+  "start_url": "/studio",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#08090a",
+  "theme_color": "#08090a",
+  "categories": ["music", "productivity", "utilities"],
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-maskable.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Open the editor",
+      "url": "/studio"
+    }
+  ]
+}

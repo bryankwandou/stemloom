@@ -1,0 +1,223 @@
+@import "tailwindcss";
+
+/* ============================================================
+   Stemloom design tokens
+   Dark-first. Every professional audio tool is dark for a
+   reason: waveforms are luminous marks and they need a low
+   luminance field to read against.
+
+   Two accents, each with a fixed meaning:
+     signal (amber)  -> the thread. selection, focus, brand.
+     live   (mint)   -> real-time metering only. never decoration.
+   ============================================================ */
+
+@theme {
+  /* Warm neutral ramp. Not pure grey, not pure black — a hint of
+     ochre keeps long editing sessions from feeling clinical. */
+  --color-void: #08090a;
+  --color-canvas: #0c0d0f;
+  --color-panel: #131417;
+  --color-raised: #1a1c20;
+  --color-hover: #22242a;
+  --color-line: #2a2d34;
+  --color-line-soft: #1f2126;
+
+  --color-ink: #f4f2ee;
+  --color-ink-dim: #a8a49c;
+  --color-ink-faint: #6d6a64;
+
+  --color-signal: #f5b843;
+  --color-signal-hot: #ffc95e;
+  --color-signal-deep: #b8801f;
+  --color-signal-wash: #f5b8431a;
+
+  --color-live: #6fe3c4;
+  --color-live-deep: #2fa387;
+
+  --color-alert: #f2603c;
+
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-mono-jet), ui-monospace, "SF Mono", monospace;
+
+  --radius-panel: 10px;
+
+  /* One easing for everything that moves. Consistency in motion
+     reads as craft more than any individual animation does. */
+  --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+* {
+  border-color: var(--color-line);
+}
+
+html {
+  background: var(--color-void);
+  color-scheme: dark;
+}
+
+body {
+  background: var(--color-void);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overscroll-behavior: none;
+}
+
+/* Numeric readouts must never reflow as digits change. */
+.tnum {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+/* Optical correction: large display type needs negative tracking
+   at the same ratio the type designer intended. */
+.display {
+  letter-spacing: -0.035em;
+  line-height: 0.95;
+}
+
+::selection {
+  background: var(--color-signal);
+  color: #000;
+}
+
+/* Focus rings only for keyboard users — mouse users already know
+   where they clicked. */
+:focus-visible {
+  outline: 2px solid var(--color-signal);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+/* Scrollbars: part of the interface, not an OS afterthought. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-line);
+  border-radius: 6px;
+  border: 2px solid var(--color-canvas);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3a3e47;
+}
+
+/* ---- Motion ------------------------------------------------ */
+
+@keyframes weave-in {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes thread-draw {
+  from {
+    stroke-dashoffset: var(--dash, 400);
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes drift {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0);
+  }
+  50% {
+    transform: translate3d(0, -10px, 0);
+  }
+}
+
+@keyframes pulse-soft {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 0.85;
+  }
+}
+
+.anim-weave {
+  animation: weave-in 0.75s var(--ease-out-quint) both;
+}
+
+.anim-drift {
+  animation: drift 7s ease-in-out infinite;
+}
+
+/* Anyone who has asked the OS to calm down gets a calm page. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Range inputs are the primary control surface of a mixer, so
+   they get real styling rather than the browser default. */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--color-line);
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 13px;
+  height: 13px;
+  margin-top: -5px;
+  border-radius: 50%;
+  background: var(--color-ink);
+  border: 1px solid #000;
+  transition: background 0.12s var(--ease-out-quint);
+}
+input[type="range"]:hover::-webkit-slider-thumb {
+  background: var(--color-signal);
+}
+input[type="range"]::-moz-range-track {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--color-line);
+}
+input[type="range"]::-moz-range-thumb {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: var(--color-ink);
+  border: 1px solid #000;
+}
+
+.grain {
+  position: relative;
+}
+.grain::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.035;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)'/%3E%3C/svg%3E");
+}
