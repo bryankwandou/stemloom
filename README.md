@@ -30,6 +30,7 @@ Stemloom aims at the gap: multitrack, offline, and unrestricted.
 - Time stretch and pitch shift by WSOLA, independent of one another, alongside
   a tape-style control where speed and pitch move together
 - Microphone recording in two stages: arm and monitor, then roll
+- A spectrogram view per lane, analysed in a worker so scrolling stays smooth
 - WAV export at 16, 24, or 32-bit float, at 44.1k / 48k / 96k, mono or stereo
 - AAC export through WebCodecs with hand-written ADTS framing
 - Triangular dither on fixed-point export
@@ -47,7 +48,6 @@ Listing these honestly is more useful than hiding them.
 
 - MP3 and Ogg encoding
 - Spectral repair
-- A spectrogram view over the waveform lanes
 - Automation lanes
 - MIDI, instruments, or anything that generates notes rather than editing them
 - An Android build
@@ -67,6 +67,7 @@ Everything in `src/lib/audio` is plain TypeScript with no audio dependencies.
 | `loudness.ts` | BS.1770-4 K-weighting, gated LUFS, loudness range, true peak |
 | `encode.ts` | WebCodecs AAC encoding with ADTS headers written by hand |
 | `recorder.ts` | Input capture through an AudioWorklet |
+| `spectrogram.ts` | Radix-2 FFT, short-time transform, and the display ramp |
 
 A few decisions worth calling out:
 

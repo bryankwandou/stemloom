@@ -20,6 +20,8 @@ import { computePeaks, type PeakSet } from "./audio/peaks";
 
 export type Selection = { trackId: string; start: number; end: number } | null;
 
+export type LaneView = "wave" | "spectrogram";
+
 export type ProjectState = {
   tracks: Track[];
   peaks: Record<string, PeakSet>;
@@ -30,6 +32,9 @@ export type ProjectState = {
   /** Horizontal zoom, in samples per pixel. */
   spp: number;
   scrollSec: number;
+  /** Amplitude envelope, or the frequency picture over time. */
+  view: LaneView;
+
   playhead: number;
   playing: boolean;
   clipboard: AudioBuffer | null;
@@ -54,6 +59,7 @@ const initial: ProjectState = {
   masterDb: 0,
   spp: 512,
   scrollSec: 0,
+  view: "wave",
   playhead: 0,
   playing: false,
   clipboard: null,

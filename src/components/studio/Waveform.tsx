@@ -11,11 +11,26 @@
  * a retina display instead of turning into a soft grey smear.
  */
 
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useReducer, useRef } from "react";
 import { columnsFor, type PeakSet } from "@/lib/audio/peaks";
+import type {
+  SpectrogramReply,
+  SpectrogramRequest,
+} from "@/lib/audio/spectrogram.worker";
+import type { LaneView } from "@/lib/store";
+
+/**
+ * Half of the worker's transform size. The analysis window is centred on
+ * each column, so the slice sent for analysis has to carry this much extra
+ * on both sides or the first and last columns would be reading zeros.
+ */
+const FFT_PAD = 2048;
 
 type Props = {
   peaks: PeakSet;
+  /** Needed only by the spectrogram, which reads samples rather than peaks. */
+  buffer: AudioBuffer;
+  view: LaneView;
   color: string;
   height: number;
   /** Leftmost visible time, in seconds. */
@@ -31,6 +46,8 @@ type Props = {
 
 export function Waveform({
   peaks,
+  buffer,
+  view,
   color,
   height,
   scrollSec,
@@ -44,6 +61,77 @@ export function Waveform({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const dragStart = useRef<number | null>(null);
+
+  /**
+   * The last spectrogram the worker sent back, with the window it covers.
+   *
+   * Keeping the geometry alongside the pixels is what lets a stale tile
+   * still be useful: while a new one is being analysed the old one is
+   * drawn shifted and scaled into its correct place, so scrolling and
+   * zooming stay continuous instead of blinking to empty. It behaves the
+   * way map tiles do.
+   */
+  const tileRef = useRef<{
+    buf: AudioBuffer;
+    startSample: number;
+    endSample: number;
+    canvas: HTMLCanvasElement;
+  } | null>(null);
+
+  const workerRef = useRef<Worker | null>(null);
+  const jobRef = useRef({ id: 0, pending: "" });
+
+  // A landed tile has to repaint the lane, but it lives in a ref rather
+  // than state — the pixels themselves never need to drive React.
+  const [tileVersion, tileLanded] = useReducer((n: number) => n + 1, 0);
+
+  useEffect(() => {
+    if (view !== "spectrogram" || workerRef.current) return;
+
+    const worker = new Worker(
+      // Relative and with the extension: the bundler resolves worker URLs
+      // statically, and a path alias is not something it can follow here.
+      new URL("../../lib/audio/spectrogram.worker.ts", import.meta.url),
+      { type: "module" },
+    );
+
+    worker.onmessage = (e: MessageEvent<SpectrogramReply>) => {
+      const reply = e.data;
+      // Anything but the newest request is a window the user has already
+      // scrolled away from.
+      if (String(reply.id) !== jobRef.current.pending.split("|")[0]) return;
+
+      const off = document.createElement("canvas");
+      off.width = reply.width;
+      off.height = reply.height;
+      const og = off.getContext("2d");
+      if (!og) return;
+      const img = og.createImageData(reply.width, reply.height);
+      img.data.set(new Uint8ClampedArray(reply.pixels));
+      og.putImageData(img, 0, 0);
+
+      const [, start, end] = jobRef.current.pending.split("|");
+      tileRef.current = {
+        buf: buffer,
+        startSample: Number(start),
+        endSample: Number(end),
+        canvas: off,
+      };
+      tileLanded();
+    };
+
+    workerRef.current = worker;
+  }, [view, buffer]);
+
+  // Tear the worker down when the lane goes, not when the view flips —
+  // flipping back and forth would otherwise pay for a new module each time.
+  useEffect(
+    () => () => {
+      workerRef.current?.terminate();
+      workerRef.current = null;
+    },
+    [],
+  );
 
   const secPerPx = spp / peaks.sampleRate;
 
@@ -78,8 +166,8 @@ export function Waveform({
     const startSample = Math.floor(startSec * peaks.sampleRate);
     const endSample = startSample + Math.floor(w * spp);
 
-    // Selection wash sits underneath the waveform so it never dims it.
-    if (selection) {
+    const drawWash = () => {
+      if (!selection) return;
       const x0 = (selection.start / peaks.sampleRate - startSec) / secPerPx;
       const x1 = (selection.end / peaks.sampleRate - startSec) / secPerPx;
       g.fillStyle = "rgba(245, 184, 67, 0.13)";
@@ -92,7 +180,98 @@ export function Waveform({
       g.moveTo(Math.round(x1) + 0.5, 0);
       g.lineTo(Math.round(x1) + 0.5, h);
       g.stroke();
+    };
+
+    const drawPlayhead = () => {
+      const px = (playhead - scrollSec) / secPerPx;
+      if (px < 0 || px > w) return;
+      g.strokeStyle = "#fff";
+      g.lineWidth = 1;
+      g.beginPath();
+      g.moveTo(Math.round(px) + 0.5, 0);
+      g.lineTo(Math.round(px) + 0.5, h);
+      g.stroke();
+    };
+
+    if (view === "spectrogram") {
+      const bands = Math.max(1, Math.floor(laneH));
+      const want = `${startSample}|${endSample}`;
+      const tile = tileRef.current;
+      const stale =
+        !tile ||
+        tile.buf !== buffer ||
+        tile.startSample !== startSample ||
+        tile.endSample !== endSample;
+
+      const worker = workerRef.current;
+      if (stale && worker && jobRef.current.pending.split("|").slice(1).join("|") !== want) {
+        const id = ++jobRef.current.id;
+        jobRef.current.pending = `${id}|${want}`;
+
+        // Copy out only the window, with the analysis window's overhang on
+        // each side. Reads past either end of the track stay zero, which
+        // is what makes a partially decoded or offset track line up with
+        // the waveform instead of sliding left.
+        const total = endSample - startSample + FFT_PAD * 2;
+        const slices: ArrayBuffer[] = [];
+        for (let c = 0; c < chans; c++) {
+          const src = buffer.getChannelData(c);
+          const slice = new Float32Array(total);
+          const from = startSample - FFT_PAD;
+          const lo = Math.max(0, -from);
+          const hi = Math.min(total, src.length - from);
+          for (let i = lo; i < hi; i++) slice[i] = src[from + i];
+          slices.push(slice.buffer);
+        }
+
+        const req: SpectrogramRequest = {
+          id,
+          channels: slices,
+          sliceOffset: FFT_PAD,
+          // Analysed at CSS resolution rather than device pixels. Matching
+          // a retina display would double the transform count for detail
+          // no one can resolve in a lane this short, and a spectrogram is
+          // a soft image to begin with.
+          columns: Math.max(64, w),
+          bands,
+          sampleRate: peaks.sampleRate,
+          windowSamples: endSample - startSample,
+        };
+        worker.postMessage(req, slices);
+      }
+
+      // Ground the lane first, so a window with no tile yet reads as
+      // "nothing analysed here" rather than as silence.
+      g.fillStyle = "#08090a";
+      g.fillRect(0, 0, w, h);
+
+      if (tile && tile.buf === buffer) {
+        // Place the tile by the window it was computed for, not by the
+        // window on screen now. If the user has scrolled since, it lands
+        // off to one side, which is correct and readable.
+        const dx = (tile.startSample - startSample) / spp;
+        const dw = (tile.endSample - tile.startSample) / spp;
+        g.imageSmoothingEnabled = true;
+        g.drawImage(tile.canvas, dx, 0, dw, laneH * chans);
+      }
+
+      for (let c = 1; c < chans; c++) {
+        g.strokeStyle = "rgba(255,255,255,0.14)";
+        g.lineWidth = 1;
+        g.beginPath();
+        g.moveTo(0, Math.round(c * laneH) + 0.5);
+        g.lineTo(w, Math.round(c * laneH) + 0.5);
+        g.stroke();
+      }
+
+      // Over the image rather than under it, since there is no empty
+      // background left for a wash to sit behind.
+      drawWash();
+      drawPlayhead();
+      return;
     }
+
+    drawWash();
 
     for (let c = 0; c < chans; c++) {
       const top = c * laneH;
@@ -152,17 +331,12 @@ export function Waveform({
     }
 
     // Playhead last, on top of everything.
-    const px = (playhead - scrollSec) / secPerPx;
-    if (px >= 0 && px <= w) {
-      g.strokeStyle = "#fff";
-      g.lineWidth = 1;
-      g.beginPath();
-      g.moveTo(Math.round(px) + 0.5, 0);
-      g.lineTo(Math.round(px) + 0.5, h);
-      g.stroke();
-    }
+    drawPlayhead();
   }, [
     peaks,
+    buffer,
+    view,
+    tileVersion,
     color,
     height,
     scrollSec,

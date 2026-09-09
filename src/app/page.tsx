@@ -358,6 +358,7 @@ export default function Home() {
                     "Silence trimming with attack padding",
                     `${EFFECTS.length} effects with live parameter control`,
                     "Time stretch and pitch shift that hold each other still",
+                    "A spectrogram view for finding hum, clicks, and hiss",
                     "Microphone recording with arm, monitor, and roll",
                     "WAV export at 16, 24, or 32-bit float, plus AAC",
                     "44.1k, 48k, and 96k sample rates",
@@ -384,7 +385,6 @@ export default function Home() {
                   {[
                     "MP3 and Ogg encoding on export",
                     "Spectral repair for clicks and hum",
-                    "A spectrogram view over the waveform lanes",
                     "Automation lanes drawn over the timeline",
                     "MIDI, instruments, and anything that generates notes",
                     "An Android build",

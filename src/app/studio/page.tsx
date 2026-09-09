@@ -24,6 +24,7 @@ import {
   set,
   undo,
   useProject,
+  type LaneView,
 } from "@/lib/store";
 
 const LANE_H = 96;
@@ -191,6 +192,7 @@ export default function Studio() {
   const selection = useProject((s) => s.selection);
   const spp = useProject((s) => s.spp);
   const scrollSec = useProject((s) => s.scrollSec);
+  const view = useProject((s) => s.view);
   const playhead = useProject((s) => s.playhead);
   const playing = useProject((s) => s.playing);
   const masterChain = useProject((s) => s.masterChain);
@@ -516,6 +518,28 @@ export default function Studio() {
         </ToolButton>
 
         <div className="ml-auto flex items-center gap-1">
+          {/* Amplitude or frequency. Two ways of looking at the same
+              samples, and each hides what the other shows. */}
+          <div className="mr-2 flex rounded-[5px] border border-line p-[2px]">
+            {(["wave", "spectrogram"] as const).map((v) => (
+              <button
+                key={v}
+                onClick={() => set({ view: v })}
+                title={
+                  v === "wave"
+                    ? "Amplitude over time"
+                    : "Frequency over time — shows hum, clicks, and hiss"
+                }
+                className="rounded-[3px] px-2 py-[3px] text-[10.5px] transition-colors"
+                style={{
+                  background: view === v ? "var(--color-signal)" : "transparent",
+                  color: view === v ? "#000" : "var(--color-ink-faint)",
+                }}
+              >
+                {v === "wave" ? "Wave" : "Spectrum"}
+              </button>
+            ))}
+          </div>
           <ToolButton onClick={() => set({ spp: Math.min(65536, spp * 1.6) })} title="Zoom out (−)">
             −
           </ToolButton>
@@ -565,6 +589,7 @@ export default function Studio() {
                   track={t}
                   peaks={peaks[t.id]}
                   isActive={t.id === activeId}
+                  view={view}
                   scrollSec={scrollSec}
                   spp={spp}
                   playhead={playhead}
@@ -732,6 +757,7 @@ function TrackLane({
   track,
   peaks,
   isActive,
+  view,
   scrollSec,
   spp,
   playhead,
@@ -743,6 +769,7 @@ function TrackLane({
   track: Track;
   peaks: import("@/lib/audio/peaks").PeakSet | undefined;
   isActive: boolean;
+  view: LaneView;
   scrollSec: number;
   spp: number;
   playhead: number;
@@ -848,6 +875,8 @@ function TrackLane({
         {peaks && (
           <Waveform
             peaks={peaks}
+            buffer={track.buffer}
+            view={view}
             color={track.color}
             height={LANE_H}
             scrollSec={scrollSec}
