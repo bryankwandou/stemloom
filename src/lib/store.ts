@@ -274,6 +274,40 @@ export function removeEffect(target: "master" | string, uid: string) {
   }
 }
 
+/**
+ * Swap the whole project out, rebuilding the peak cache for every track.
+ * Used when opening something off disk.
+ */
+export function loadTracks(
+  tracks: Track[],
+  masterChain: EffectInstance[],
+  masterDb: number,
+  label: string,
+) {
+  const peaks: Record<string, PeakSet> = {};
+  for (const t of tracks) peaks[t.id] = computePeaks(t.buffer);
+
+  // Keep the counter ahead of anything restored, or the next new track
+  // would collide with an id that already exists.
+  for (const t of tracks) {
+    const n = Number(t.id.replace(/^t/, ""));
+    if (Number.isFinite(n) && n > trackCounter) trackCounter = n;
+  }
+
+  undoStack.length = 0;
+  redoStack.length = 0;
+  state = {
+    ...initial,
+    tracks,
+    peaks,
+    masterChain,
+    masterDb,
+    activeTrackId: tracks[0]?.id ?? null,
+    status: label,
+  };
+  emit();
+}
+
 export function resetProject() {
   undoStack.length = 0;
   redoStack.length = 0;

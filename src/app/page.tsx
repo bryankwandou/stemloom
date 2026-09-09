@@ -357,8 +357,12 @@ export default function Home() {
                     "Peak normalisation, phase invert, DC offset repair",
                     "Silence trimming with attack padding",
                     `${EFFECTS.length} effects with live parameter control`,
-                    "WAV export at 16, 24, or 32-bit float",
+                    "Time stretch and pitch shift that hold each other still",
+                    "Microphone recording with arm, monitor, and roll",
+                    "WAV export at 16, 24, or 32-bit float, plus AAC",
                     "44.1k, 48k, and 96k sample rates",
+                    "Loudness measured to BS.1770 with true peak",
+                    "Projects saved locally and reopened intact",
                     "Real-time level metering and log-scaled spectrum",
                     "Undo history sixty steps deep",
                   ].map((f) => (
@@ -378,12 +382,11 @@ export default function Home() {
                 </h3>
                 <ul className="space-y-2.5 text-[13.5px] text-ink-faint">
                   {[
-                    "Microphone recording straight to a track",
                     "MP3 and Ogg encoding on export",
-                    "Time stretch that holds pitch",
                     "Spectral repair for clicks and hum",
+                    "A spectrogram view over the waveform lanes",
                     "Automation lanes drawn over the timeline",
-                    "Projects saved into the origin private file system",
+                    "MIDI, instruments, and anything that generates notes",
                     "An Android build",
                   ].map((f) => (
                     <li key={f} className="flex gap-2.5">

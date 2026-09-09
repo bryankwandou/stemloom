@@ -26,9 +26,17 @@ Stemloom aims at the gap: multitrack, offline, and unrestricted.
 - Peak normalisation, gain in dB, reverse, phase inversion, DC offset repair
 - Silence trimming with configurable threshold and attack padding
 - Channel swap and mid/side stereo width
-- Fourteen effects across dynamics, EQ, time, modulation, character, and space
+- Twenty-two effects across dynamics, EQ, time, modulation, character, and space
+- Time stretch and pitch shift by WSOLA, independent of one another, alongside
+  a tape-style control where speed and pitch move together
+- Microphone recording in two stages: arm and monitor, then roll
 - WAV export at 16, 24, or 32-bit float, at 44.1k / 48k / 96k, mono or stereo
+- AAC export through WebCodecs with hand-written ADTS framing
 - Triangular dither on fixed-point export
+- Loudness measurement to ITU-R BS.1770-4: integrated LUFS, loudness range,
+  and inter-sample true peak, against Spotify, Apple, EBU R128, and CD targets
+- Projects saved to IndexedDB as raw float samples, so reopening costs nothing
+  in quality
 - Real-time peak and RMS metering, plus a log-scaled spectrum
 - Sixty steps of undo
 - Installs as a PWA and keeps working with the network off
@@ -37,13 +45,11 @@ Stemloom aims at the gap: multitrack, offline, and unrestricted.
 
 Listing these honestly is more useful than hiding them.
 
-- Microphone recording
 - MP3 and Ogg encoding
-- Time stretch that preserves pitch (the current pitch control is tape-style —
-  speed and pitch move together)
 - Spectral repair
+- A spectrogram view over the waveform lanes
 - Automation lanes
-- Project persistence to the origin private file system
+- MIDI, instruments, or anything that generates notes rather than editing them
 - An Android build
 
 ## How it is put together
@@ -57,6 +63,10 @@ Everything in `src/lib/audio` is plain TypeScript with no audio dependencies.
 | `edits.ts` | Pure sample-level edit operations; every function returns a new buffer |
 | `effects.ts` | Effect registry and Web Audio graph construction |
 | `engine.ts` | Transport, live playback, metering, and offline bounce |
+| `timestretch.ts` | WSOLA time stretch, pitch shift, and sample-rate conversion |
+| `loudness.ts` | BS.1770-4 K-weighting, gated LUFS, loudness range, true peak |
+| `encode.ts` | WebCodecs AAC encoding with ADTS headers written by hand |
+| `recorder.ts` | Input capture through an AudioWorklet |
 
 A few decisions worth calling out:
 
@@ -75,6 +85,16 @@ and an audible click.
 **Reverb impulses are synthesised at render time** rather than shipped as
 audio files, with progressive lowpassing through the tail so rooms sound like
 rooms and not metal boxes. It keeps the installable payload small.
+
+**Stretching reads from an ideal position, not the last one.** WSOLA finds the
+best splice point within a search window, but if the read head then advances
+from wherever it landed, the small corrections accumulate and the output drifts
+away from the requested length. Advancing by the nominal hop from the ideal
+position instead keeps the error bounded.
+
+**Recording defaults to no cleanup.** Echo cancellation, noise suppression, and
+automatic gain are all off unless asked for. They exist for calls and they
+destroy a music take.
 
 **Position comes from the audio clock**, derived from `ctx.currentTime`, not
 from a `setInterval`. A timer drifts against the audio hardware; a derived

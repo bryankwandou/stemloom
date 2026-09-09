@@ -5,8 +5,11 @@ import Link from "next/link";
 import { Mark } from "@/components/brand/Logo";
 import { Waveform } from "@/components/studio/Waveform";
 import { FxRack } from "@/components/studio/FxRack";
-import { Engine, bounce, type Track } from "@/lib/audio/engine";
-import { encodeWav, analyse, type BitDepth } from "@/lib/audio/wav";
+import { ExportDialog } from "@/components/studio/ExportDialog";
+import { ProjectsDialog } from "@/components/studio/ProjectsDialog";
+import { RecordButton } from "@/components/studio/RecordButton";
+import { ShortcutsDialog } from "@/components/studio/ShortcutsDialog";
+import { Engine, type Track } from "@/lib/audio/engine";
 import * as ed from "@/lib/audio/edits";
 import {
   addTrack,
@@ -196,6 +199,8 @@ export default function Studio() {
 
   const [busy, setBusy] = useState<string | null>(null);
   const [showExport, setShowExport] = useState(false);
+  const [showProjects, setShowProjects] = useState(false);
+  const [showKeys, setShowKeys] = useState(false);
   const [rackTab, setRackTab] = useState<"track" | "master">("track");
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -365,42 +370,6 @@ export default function Studio() {
 
   useEffect(() => () => engine.dispose(), [engine]);
 
-  /* ---- Export ----------------------------------------------------- */
-
-  const [expDepth, setExpDepth] = useState<BitDepth>(24);
-  const [expRate, setExpRate] = useState(48000);
-  const [expChans, setExpChans] = useState<1 | 2>(2);
-
-  const runExport = async () => {
-    if (tracks.length === 0) return;
-    setBusy("Rendering mixdown");
-    try {
-      const mixed = await bounce(tracks, masterChain, masterDb, expRate);
-      const info = analyse(mixed);
-      const blob = encodeWav(mixed, {
-        bitDepth: expDepth,
-        channels: expChans,
-      });
-
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `stemloom-mix-${Date.now()}.wav`;
-      a.click();
-      URL.revokeObjectURL(url);
-
-      set({
-        status:
-          info.clippedSamples > 0
-            ? `Exported. ${info.clippedSamples} clipped samples — consider a limiter.`
-            : `Exported at ${info.peakDb.toFixed(1)} dBFS peak.`,
-      });
-      setShowExport(false);
-    } finally {
-      setBusy(null);
-    }
-  };
-
   /* ---- Render ----------------------------------------------------- */
 
   const secPerPx = spp / (engine.sampleRate || 48000);
@@ -440,6 +409,10 @@ export default function Studio() {
         <ToolButton onClick={addTestTone} title="Insert a synthesised test signal">
           Test Signal
         </ToolButton>
+        <RecordButton engine={engine} onStatus={(m) => set({ status: m })} />
+        <ToolButton onClick={() => setShowProjects(true)} title="Save or open a project">
+          Projects
+        </ToolButton>
         <ToolButton onClick={() => setShowExport(true)} disabled={!tracks.length}>
           Export
         </ToolButton>
@@ -454,7 +427,16 @@ export default function Studio() {
         </ToolButton>
 
         <div className="ml-auto flex items-center gap-3">
-          <span className="text-[11px] text-ink-faint">{status}</span>
+          <span className="max-w-[280px] truncate text-[11px] text-ink-faint">
+            {status}
+          </span>
+          <button
+            onClick={() => setShowKeys(true)}
+            title="Keyboard shortcuts"
+            className="grid size-6 place-items-center rounded-[5px] border border-line text-[10px] text-ink-faint transition-colors hover:border-signal hover:text-signal"
+          >
+            ?
+          </button>
           <Meter engine={engine} />
         </div>
       </header>
@@ -713,74 +695,26 @@ export default function Studio() {
         </aside>
       </div>
 
-      {/* ---- Export dialog ---- */}
+      {showProjects && (
+        <ProjectsDialog
+          tracks={tracks}
+          masterChain={masterChain}
+          masterDb={masterDb}
+          onClose={() => setShowProjects(false)}
+          onStatus={(msg) => set({ status: msg })}
+        />
+      )}
+
+      {showKeys && <ShortcutsDialog onClose={() => setShowKeys(false)} />}
+
       {showExport && (
-        <div
-          className="fixed inset-0 z-50 grid place-items-center bg-black/70 p-6"
-          onClick={() => setShowExport(false)}
-        >
-          <div
-            className="w-full max-w-sm rounded-[12px] border border-line bg-panel p-5 anim-weave"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h2 className="text-[15px] font-semibold">Export mixdown</h2>
-            <p className="mt-1 text-[12px] leading-relaxed text-ink-dim">
-              Rendered on this machine and saved straight to your downloads. No
-              watermark, no account, no upload.
-            </p>
-
-            <div className="mt-4 space-y-3">
-              <Field label="Bit depth">
-                <Segmented
-                  options={[
-                    { v: 16, l: "16-bit" },
-                    { v: 24, l: "24-bit" },
-                    { v: 32, l: "32-bit float" },
-                  ]}
-                  value={expDepth}
-                  onChange={(v) => setExpDepth(v as BitDepth)}
-                />
-              </Field>
-              <Field label="Sample rate">
-                <Segmented
-                  options={[
-                    { v: 44100, l: "44.1k" },
-                    { v: 48000, l: "48k" },
-                    { v: 96000, l: "96k" },
-                  ]}
-                  value={expRate}
-                  onChange={setExpRate}
-                />
-              </Field>
-              <Field label="Channels">
-                <Segmented
-                  options={[
-                    { v: 1, l: "Mono" },
-                    { v: 2, l: "Stereo" },
-                  ]}
-                  value={expChans}
-                  onChange={(v) => setExpChans(v as 1 | 2)}
-                />
-              </Field>
-            </div>
-
-            <div className="mt-5 flex gap-2">
-              <button
-                onClick={() => setShowExport(false)}
-                className="flex-1 rounded-[6px] border border-line py-2 text-[12.5px] text-ink-dim transition-colors hover:text-ink"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={runExport}
-                disabled={!!busy}
-                className="flex-1 rounded-[6px] bg-signal py-2 text-[12.5px] font-medium text-black transition-transform hover:scale-[1.02] disabled:opacity-50"
-              >
-                {busy ? "Rendering…" : "Render WAV"}
-              </button>
-            </div>
-          </div>
-        </div>
+        <ExportDialog
+          tracks={tracks}
+          masterChain={masterChain}
+          masterDb={masterDb}
+          onClose={() => setShowExport(false)}
+          onStatus={(msg) => set({ status: msg })}
+        />
       )}
 
       {busy && !showExport && (
@@ -788,47 +722,6 @@ export default function Studio() {
           {busy}
         </div>
       )}
-    </div>
-  );
-}
-
-/* ------------------------------------------------------------------ */
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div>
-      <div className="mb-1.5 text-[11px] uppercase tracking-[0.1em] text-ink-faint">
-        {label}
-      </div>
-      {children}
-    </div>
-  );
-}
-
-function Segmented<T extends number>({
-  options,
-  value,
-  onChange,
-}: {
-  options: { v: T; l: string }[];
-  value: T;
-  onChange: (v: T) => void;
-}) {
-  return (
-    <div className="flex gap-1 rounded-[6px] border border-line p-0.5">
-      {options.map((o) => (
-        <button
-          key={o.v}
-          onClick={() => onChange(o.v)}
-          className="flex-1 rounded-[4px] py-1 text-[11.5px] transition-colors"
-          style={{
-            background: value === o.v ? "var(--color-signal)" : "transparent",
-            color: value === o.v ? "#000" : "var(--color-ink-dim)",
-          }}
-        >
-          {o.l}
-        </button>
-      ))}
     </div>
   );
 }

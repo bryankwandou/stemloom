@@ -279,15 +279,104 @@ export const EFFECTS: EffectSpec[] = [
     ],
   },
   {
-    id: "pitch",
-    name: "Speed & Pitch",
+    id: "phaser",
+    name: "Phaser",
+    group: "Modulation",
+    blurb: "Cascaded all-pass stages sweeping notches through the spectrum.",
+    params: [
+      { key: "rate", label: "Rate", min: 0.02, max: 6, step: 0.02, def: 0.4, unit: "Hz" },
+      { key: "stages", label: "Stages", min: 2, max: 12, step: 2, def: 6, unit: "" },
+      { key: "centre", label: "Centre", min: 200, max: 4000, step: 10, def: 900, unit: "Hz", curve: "log" },
+      { key: "spread", label: "Sweep", min: 100, max: 3000, step: 10, def: 1100, unit: "Hz", curve: "log" },
+      { key: "feedback", label: "Feedback", min: 0, max: 90, step: 1, def: 40, unit: "%" },
+      { key: "mix", label: "Mix", min: 0, max: 100, step: 1, def: 50, unit: "%" },
+    ],
+  },
+  {
+    id: "autopan",
+    name: "Auto Pan",
+    group: "Modulation",
+    blurb: "Walks the signal across the stereo field on a steady cycle.",
+    params: [
+      { key: "rate", label: "Rate", min: 0.05, max: 10, step: 0.05, def: 0.6, unit: "Hz" },
+      { key: "depth", label: "Width", min: 0, max: 100, step: 1, def: 70, unit: "%" },
+    ],
+  },
+  {
+    id: "ringmod",
+    name: "Ring Modulator",
     group: "Character",
-    blurb: "Resamples the whole clip. Length and pitch move together, like tape.",
+    blurb: "Multiplies the signal by a tone. Low rates wobble, high rates turn metallic.",
+    params: [
+      { key: "freq", label: "Frequency", min: 0.5, max: 3000, step: 0.5, def: 180, unit: "Hz", curve: "log" },
+      { key: "mix", label: "Mix", min: 0, max: 100, step: 1, def: 55, unit: "%" },
+    ],
+  },
+  {
+    id: "exciter",
+    name: "Exciter",
+    group: "Character",
+    blurb: "Generates harmonics above a crossover to add air without raising the EQ.",
+    params: [
+      { key: "crossover", label: "Crossover", min: 1000, max: 12000, step: 100, def: 3500, unit: "Hz", curve: "log" },
+      { key: "drive", label: "Drive", min: 0, max: 100, step: 1, def: 40, unit: "%" },
+      { key: "amount", label: "Amount", min: 0, max: 100, step: 1, def: 30, unit: "%" },
+    ],
+  },
+  {
+    id: "deesser",
+    name: "De-esser",
+    group: "Dynamics",
+    blurb: "Compresses only the sibilant band, so the rest of the take is untouched.",
+    params: [
+      { key: "freq", label: "Band", min: 2000, max: 12000, step: 100, def: 6500, unit: "Hz", curve: "log" },
+      { key: "threshold", label: "Threshold", min: -50, max: 0, step: 0.5, def: -26, unit: "dB" },
+      { key: "amount", label: "Reduction", min: 1, max: 20, step: 0.5, def: 6, unit: ":1" },
+    ],
+  },
+  {
+    id: "comb",
+    name: "Comb Resonator",
+    group: "Space",
+    blurb: "A very short feedback delay that rings at a pitch you choose.",
+    params: [
+      { key: "freq", label: "Pitch", min: 40, max: 1200, step: 1, def: 220, unit: "Hz", curve: "log" },
+      { key: "feedback", label: "Resonance", min: 0, max: 95, step: 1, def: 70, unit: "%" },
+      { key: "damping", label: "Damping", min: 500, max: 16000, step: 100, def: 6000, unit: "Hz", curve: "log" },
+      { key: "mix", label: "Mix", min: 0, max: 100, step: 1, def: 40, unit: "%" },
+    ],
+  },
+  {
+    id: "pitch",
+    name: "Tape Speed",
+    group: "Character",
+    blurb: "Resamples the clip. Length and pitch move together, the way tape does.",
     params: [
       { key: "semitones", label: "Pitch", min: -24, max: 24, step: 1, def: 0, unit: "st" },
     ],
   },
+  {
+    id: "pitchshift",
+    name: "Pitch Shift",
+    group: "Character",
+    blurb: "Transposes without changing duration. Uses waveform similarity matching.",
+    params: [
+      { key: "semitones", label: "Pitch", min: -12, max: 12, step: 1, def: 0, unit: "st" },
+    ],
+  },
+  {
+    id: "stretch",
+    name: "Time Stretch",
+    group: "Character",
+    blurb: "Changes duration and leaves pitch alone. 200 is twice as long.",
+    params: [
+      { key: "amount", label: "Length", min: 25, max: 400, step: 1, def: 100, unit: "%", curve: "log" },
+    ],
+  },
 ];
+
+/** Handled outside the node graph because they change the buffer length. */
+const OFFLINE_ONLY = new Set(["pitch", "pitchshift", "stretch"]);
 
 export const EFFECT_BY_ID = new Map(EFFECTS.map((e) => [e.id, e]));
 
@@ -516,6 +605,155 @@ function buildEffect(
       return wetDry(shaper, v.mix);
     }
 
+    case "phaser": {
+      // A phaser is a stack of all-pass filters, which leave magnitude
+      // alone and only shift phase. Summed back with the dry signal, the
+      // frequencies that came back inverted cancel, and sweeping the
+      // filters drags those notches through the spectrum.
+      const stages = Math.max(2, Math.round(v.stages));
+      const lfo = ctx.createOscillator();
+      lfo.type = "sine";
+      lfo.frequency.value = v.rate;
+
+      const depth = ctx.createGain();
+      depth.gain.value = v.spread;
+      lfo.connect(depth);
+      lfo.start();
+
+      let node: AudioNode = input;
+      let last: BiquadFilterNode | null = null;
+
+      for (let i = 0; i < stages; i++) {
+        const ap = ctx.createBiquadFilter();
+        ap.type = "allpass";
+        // Spreading the stages apart widens the notch pattern; stacking
+        // them all on one frequency just makes a single deeper notch.
+        ap.frequency.value = v.centre * (1 + i * 0.22);
+        ap.Q.value = 0.6;
+        depth.connect(ap.frequency);
+        node.connect(ap);
+        node = ap;
+        last = ap;
+      }
+
+      if (last && v.feedback > 0) {
+        const fb = ctx.createGain();
+        fb.gain.value = Math.min(0.9, v.feedback / 100);
+        last.connect(fb);
+        fb.connect(last);
+      }
+
+      return wetDry(last ?? input, v.mix);
+    }
+
+    case "autopan": {
+      const panner = ctx.createStereoPanner();
+      panner.pan.value = 0;
+
+      const lfo = ctx.createOscillator();
+      lfo.type = "sine";
+      lfo.frequency.value = v.rate;
+
+      const depth = ctx.createGain();
+      depth.gain.value = Math.min(1, v.depth / 100);
+      lfo.connect(depth).connect(panner.pan);
+      lfo.start();
+
+      input.connect(panner);
+      return { input, output: panner };
+    }
+
+    case "ringmod": {
+      // Amplitude multiplication. A GainNode's gain parameter accepts an
+      // audio-rate connection, so wiring an oscillator into it multiplies
+      // the two signals sample by sample.
+      const ring = ctx.createGain();
+      ring.gain.value = 0;
+
+      const carrier = ctx.createOscillator();
+      carrier.type = "sine";
+      carrier.frequency.value = v.freq;
+      carrier.connect(ring.gain);
+      carrier.start();
+
+      input.connect(ring);
+      return wetDry(ring, v.mix);
+    }
+
+    case "exciter": {
+      // Distort only the top end and blend it back under the original.
+      // Doing this to the whole signal would just sound dirty; confining
+      // it above a crossover is what reads as air rather than grit.
+      const hp = ctx.createBiquadFilter();
+      hp.type = "highpass";
+      hp.frequency.value = v.crossover;
+
+      const shaper = ctx.createWaveShaper();
+      shaper.curve = makeDistortionCurve(0.25 + (v.drive / 100) * 0.6);
+      shaper.oversample = "4x";
+
+      // Trim below the crossover again: the shaper folds energy downward
+      // and that mud is exactly what we do not want back in the mix.
+      const clean = ctx.createBiquadFilter();
+      clean.type = "highpass";
+      clean.frequency.value = v.crossover * 0.9;
+
+      const amount = ctx.createGain();
+      amount.gain.value = (v.amount / 100) * 0.85;
+
+      const out = ctx.createGain();
+      input.connect(hp).connect(shaper).connect(clean).connect(amount);
+      amount.connect(out);
+      input.connect(out);
+
+      return { input, output: out };
+    }
+
+    case "deesser": {
+      // Split the sibilant band off, compress that alone, and put it back.
+      // A full-band compressor triggered by an "s" ducks the entire voice,
+      // which is the pumping that gives away a badly de-essed vocal.
+      const split = ctx.createBiquadFilter();
+      split.type = "highpass";
+      split.frequency.value = v.freq;
+
+      const body = ctx.createBiquadFilter();
+      body.type = "lowpass";
+      body.frequency.value = v.freq;
+
+      const comp = ctx.createDynamicsCompressor();
+      comp.threshold.value = v.threshold;
+      comp.ratio.value = v.amount;
+      comp.attack.value = 0.001;
+      comp.release.value = 0.05;
+      comp.knee.value = 6;
+
+      const out = ctx.createGain();
+      input.connect(split).connect(comp).connect(out);
+      input.connect(body).connect(out);
+
+      return { input, output: out };
+    }
+
+    case "comb": {
+      // Delay time set to one period of the target pitch, so the
+      // reinforced harmonics land on that note.
+      const d = ctx.createDelay(0.1);
+      d.delayTime.value = Math.min(0.099, 1 / Math.max(20, v.freq));
+
+      const fb = ctx.createGain();
+      fb.gain.value = Math.min(0.95, v.feedback / 100);
+
+      const damp = ctx.createBiquadFilter();
+      damp.type = "lowpass";
+      damp.frequency.value = v.damping;
+
+      input.connect(d);
+      d.connect(damp).connect(fb).connect(d);
+
+      return wetDry(d, v.mix);
+    }
+
     case "widener": {
       // Mid/side via gain matrix: split, sum and difference, recombine.
       const splitter = ctx.createChannelSplitter(2);
@@ -564,8 +802,11 @@ function buildEffect(
 /**
  * Render a buffer through a chain of effects.
  *
- * Pitch is handled outside the graph because it changes the output length,
- * which has to be known before the OfflineAudioContext is constructed.
+ * Anything that changes the buffer's length cannot live in the node graph,
+ * because an OfflineAudioContext needs its output length declared before
+ * a single sample is processed. Those run as separate passes: tape speed
+ * inside the graph via playbackRate, and the two length-changing
+ * processors afterwards on the rendered result.
  */
 export async function renderChain(
   source: AudioBuffer,
@@ -574,10 +815,10 @@ export async function renderChain(
   const active = chain.filter((e) => e.enabled);
   if (active.length === 0) return source;
 
-  const pitch = active.find((e) => e.id === "pitch");
-  const graphEffects = active.filter((e) => e.id !== "pitch");
+  const tape = active.find((e) => e.id === "pitch");
+  const graphEffects = active.filter((e) => !OFFLINE_ONLY.has(e.id));
 
-  const rate = pitch ? Math.pow(2, (pitch.values.semitones ?? 0) / 12) : 1;
+  const rate = tape ? Math.pow(2, (tape.values.semitones ?? 0) / 12) : 1;
   const outLength = Math.ceil(source.length / rate);
 
   const ctx = new OfflineAudioContext(
@@ -601,7 +842,24 @@ export async function renderChain(
   node.connect(ctx.destination);
   src.start(0);
 
-  return ctx.startRendering();
+  let out = await ctx.startRendering();
+
+  // Loaded lazily so the WSOLA code never reaches a bundle that has no
+  // use for it.
+  const shift = active.find((e) => e.id === "pitchshift");
+  const stretch = active.find((e) => e.id === "stretch");
+
+  if (shift || stretch) {
+    const ts = await import("./timestretch");
+    if (shift && Math.abs(shift.values.semitones ?? 0) >= 1) {
+      out = ts.pitchShift(out, shift.values.semitones);
+    }
+    if (stretch && Math.abs((stretch.values.amount ?? 100) - 100) > 0.5) {
+      out = ts.timeStretch(out, (stretch.values.amount ?? 100) / 100);
+    }
+  }
+
+  return out;
 }
 
 /** Preview a single effect on a short excerpt so auditioning stays instant. */
