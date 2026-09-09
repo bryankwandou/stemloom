@@ -44,3 +44,6 @@ next-env.d.ts
 
 # vercel
 .vercel
+
+.tmp-check/
+harness-results.json

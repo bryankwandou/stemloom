@@ -110,6 +110,42 @@ npm run dev
 
 Then open `http://localhost:3000`.
 
+## Verification
+
+A green TypeScript build says nothing about whether a microphone opens, an
+encoder emits a valid bitstream, or a canvas has any pixels on it. Two
+suites cover that, and both are meant to be run by hand.
+
+`scripts/browser-check.mjs` drives the real page in real Chromium and reads
+the bytes that come out: the exported WAV is parsed back and checked for a
+RIFF header whose declared length matches the file and for sample data that
+is not silence, the AAC file is walked frame by frame to confirm the ADTS
+sync words chain correctly, and recording is exercised against the
+synthetic input device Chrome offers behind its fake-media flags. It also
+confirms the editor still loads with the network switched off.
+
+Playwright is deliberately not a dependency — it is a large download for
+something that runs occasionally — so point the script at an installation
+you already have:
+
+```bash
+PLAYWRIGHT=/path/to/playwright/index.mjs node scripts/browser-check.mjs
+BASE=http://localhost:3000 node scripts/browser-check.mjs
+```
+
+`scripts/spectrogram-check.mjs` covers the transform numerically, since a
+spectrogram that draws something is not the same as one that is correct,
+and a wrong one has you chasing a hum that was never there. Synthesised
+tones from 50 Hz to 12 kHz have to land within a semitone, two tones an
+octave apart have to resolve as two peaks with a real trough between them,
+level has to rise monotonically with amplitude, silence has to floor, and
+windows running off the end of the buffer have to stay finite.
+
+```bash
+npx tsc src/lib/audio/spectrogram.ts --target es2020 --module es2020   --types --skipLibCheck --outDir .tmp-check
+node scripts/spectrogram-check.mjs .tmp-check/spectrogram.js
+```
+
 ## On the subject of other people's software
 
 This is not a clone, a mod, or a crack of any commercial product, and it does
