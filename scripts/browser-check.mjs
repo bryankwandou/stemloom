@@ -189,8 +189,8 @@ async function main() {
     await page.keyboard.press("Control+z");
     await page.waitForTimeout(800);
     assert(/Undo/.test(await page.innerText("body")), "undo did not step back");
-    return text.match(/Healed [^
-]*/)[0].slice(0, 60);
+    // Dot stops at a line break, which is exactly the boundary wanted.
+    return text.match(/Healed .*/)[0].slice(0, 60);
   });
 
   await check("notching the band reports the cut it applied", async () => {
@@ -200,8 +200,7 @@ async function main() {
     assert(/Cut .*40 dB/.test(text), "no notch reported in the status line");
     await page.keyboard.press("Control+z");
     await page.waitForTimeout(800);
-    return text.match(/Cut [^
-]*/)[0].slice(0, 60);
+    return text.match(/Cut .*/)[0].slice(0, 60);
   });
 
   await check("returns to the waveform view", async () => {
