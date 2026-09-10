@@ -14,7 +14,7 @@
  * saves, and it would have to be thrown away on every edit anyway.
  */
 
-type Plan = {
+export type Plan = {
   n: number;
   cos: Float32Array;
   sin: Float32Array;
@@ -25,7 +25,12 @@ type Plan = {
 /** Cached twiddle factors and bit-reversal tables, keyed by transform size. */
 const plans = new Map<number, Plan>();
 
-function plan(n: number): Plan {
+/**
+ * Shared with the repair code, which needs the same tables to run the
+ * transform backwards. Building a second set would double the memory for
+ * no reason, and the two would be free to drift apart.
+ */
+export function plan(n: number): Plan {
   const hit = plans.get(n);
   if (hit) return hit;
 
@@ -64,7 +69,7 @@ function plan(n: number): Plan {
  * which the caller arranges while it is copying and windowing the frame.
  * That saves a whole pass over the data.
  */
-function fft(re: Float32Array, im: Float32Array, p: Plan) {
+export function fft(re: Float32Array, im: Float32Array, p: Plan) {
   const n = p.n;
   for (let size = 2; size <= n; size <<= 1) {
     const half = size >> 1;
@@ -253,4 +258,16 @@ export function paint(frame: SpectrogramFrame, out: Uint8ClampedArray) {
 /** Centre frequency of a display row, for axis labelling. */
 export function bandFrequency(band: number, bands: number, sampleRate: number) {
   return LOW_HZ * Math.pow(topHz(sampleRate) / LOW_HZ, band / bands);
+}
+
+/**
+ * Where a frequency sits on the lane, as a fraction from bottom to top.
+ *
+ * The inverse of `bandFrequency`, and it exists so that drawing a band
+ * selection cannot disagree with the picture underneath it. Values outside
+ * the displayed span come back outside zero to one rather than clamped, so
+ * a selection dragged past the edge still lands somewhere sensible.
+ */
+export function bandPosition(hz: number, sampleRate: number) {
+  return Math.log(Math.max(1e-6, hz) / LOW_HZ) / Math.log(topHz(sampleRate) / LOW_HZ);
 }

@@ -22,6 +22,16 @@ export type Selection = { trackId: string; start: number; end: number } | null;
 
 export type LaneView = "wave" | "spectrogram";
 
+/**
+ * The vertical half of a spectrogram selection.
+ *
+ * Kept apart from `selection` rather than folded into it because the two
+ * have different lifetimes: dragging in the waveform view sets a time
+ * range and has no opinion about frequency, and switching views should not
+ * silently throw away either one.
+ */
+export type BandSelection = { loHz: number; hiHz: number } | null;
+
 export type ProjectState = {
   tracks: Track[];
   peaks: Record<string, PeakSet>;
@@ -34,6 +44,7 @@ export type ProjectState = {
   scrollSec: number;
   /** Amplitude envelope, or the frequency picture over time. */
   view: LaneView;
+  band: BandSelection;
 
   playhead: number;
   playing: boolean;
@@ -60,6 +71,7 @@ const initial: ProjectState = {
   spp: 512,
   scrollSec: 0,
   view: "wave",
+  band: null,
   playhead: 0,
   playing: false,
   clipboard: null,

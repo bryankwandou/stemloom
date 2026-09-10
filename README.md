@@ -31,6 +31,9 @@ Stemloom aims at the gap: multitrack, offline, and unrestricted.
   a tape-style control where speed and pitch move together
 - Microphone recording in two stages: arm and monitor, then roll
 - A spectrogram view per lane, analysed in a worker so scrolling stays smooth
+- Spectral repair: drag a box around a noise on the spectrogram and either
+  rebuild that patch from the sound either side of it or pull it down 40 dB,
+  leaving everything above and below the box alone
 - WAV export at 16, 24, or 32-bit float, at 44.1k / 48k / 96k, mono or stereo
 - AAC export through WebCodecs with hand-written ADTS framing
 - Triangular dither on fixed-point export
@@ -47,7 +50,6 @@ Stemloom aims at the gap: multitrack, offline, and unrestricted.
 Listing these honestly is more useful than hiding them.
 
 - MP3 and Ogg encoding
-- Spectral repair
 - Automation lanes
 - MIDI, instruments, or anything that generates notes rather than editing them
 - An Android build
@@ -68,6 +70,7 @@ Everything in `src/lib/audio` is plain TypeScript with no audio dependencies.
 | `encode.ts` | WebCodecs AAC encoding with ADTS headers written by hand |
 | `recorder.ts` | Input capture through an AudioWorklet |
 | `spectrogram.ts` | Radix-2 FFT, short-time transform, and the display ramp |
+| `spectral.ts` | The same transform run backwards, for repairing a band over a range |
 
 A few decisions worth calling out:
 
@@ -92,6 +95,14 @@ best splice point within a search window, but if the read head then advances
 from wherever it landed, the small corrections accumulate and the output drifts
 away from the requested length. Advancing by the nominal hop from the ideal
 position instead keeps the error bounded.
+
+**Repair reads its reference from two windows out.** Healing a band fills
+it by interpolating from the frames either side of the selection, but a
+frame whose centre sits just outside the selection still overlaps it by
+half a window, so it holds a good part of whatever is being removed. Read
+from there and the gap fills with a quieter copy of the problem — measured
+at 12 dB of attenuation instead of the 62 dB the same edit gives once the
+reference frames are taken from beyond the overlap.
 
 **Recording defaults to no cleanup.** Echo cancellation, noise suppression, and
 automatic gain are all off unless asked for. They exist for calls and they
@@ -144,6 +155,21 @@ windows running off the end of the buffer have to stay finite.
 ```bash
 npx tsc src/lib/audio/spectrogram.ts --target es2020 --module es2020   --types --skipLibCheck --outDir .tmp-check
 node scripts/spectrogram-check.mjs .tmp-check/spectrogram.js
+```
+
+`scripts/spectral-check.mjs` holds repair to the property it depends on:
+an edit that changes nothing has to return the samples it was given. It
+does, to within 138 dB of the original, which is below the noise floor of
+any format you could export to. The rest of the suite measures a real
+edit — a tone confined to the selection drops 62 dB while a tone outside
+the band moves by a hundredth of one, a tone running through the
+selection is put back at the level it went in, and samples outside the
+selected time are byte for byte unchanged.
+
+```bash
+npx tsc src/lib/audio/spectral.ts src/lib/audio/spectrogram.ts   --target es2020 --module es2020 --skipLibCheck --outDir .tmp-check
+node scripts/fix-esm.mjs .tmp-check
+node scripts/spectral-check.mjs
 ```
 
 ## On the subject of other people's software

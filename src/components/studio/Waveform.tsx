@@ -17,7 +17,8 @@ import type {
   SpectrogramReply,
   SpectrogramRequest,
 } from "@/lib/audio/spectrogram.worker";
-import type { LaneView } from "@/lib/store";
+import { bandFrequency, bandPosition } from "@/lib/audio/spectrogram";
+import type { BandSelection, LaneView } from "@/lib/store";
 
 /**
  * Half of the worker's transform size. The analysis window is centred on
@@ -40,8 +41,11 @@ type Props = {
   playhead: number;
   offset: number;
   selection: { start: number; end: number } | null;
+  /** Only meaningful in the spectrogram view. */
+  band: BandSelection;
   onScrub: (sec: number) => void;
   onSelect: (range: { start: number; end: number } | null) => void;
+  onBand: (band: BandSelection) => void;
 };
 
 export function Waveform({
@@ -55,12 +59,16 @@ export function Waveform({
   playhead,
   offset,
   selection,
+  band,
   onScrub,
   onSelect,
+  onBand,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const dragStart = useRef<number | null>(null);
+  /** Frequency the drag began at, so a rectangle can be worked out. */
+  const dragHz = useRef<number | null>(null);
 
   /**
    * The last spectrogram the worker sent back, with the window it covers.
@@ -267,6 +275,44 @@ export function Waveform({
       // Over the image rather than under it, since there is no empty
       // background left for a wash to sit behind.
       drawWash();
+
+      if (band) {
+        // Shade everything the repair will not touch, rather than outline
+        // what it will. The eye reads the bright unshaded rectangle as the
+        // subject, which is the right way round: what matters is what is
+        // about to be altered.
+        const x0 = selection
+          ? (selection.start / peaks.sampleRate - startSec) / secPerPx
+          : 0;
+        const x1 = selection
+          ? (selection.end / peaks.sampleRate - startSec) / secPerPx
+          : w;
+        const lo = bandPosition(band.loHz, peaks.sampleRate);
+        const hi = bandPosition(band.hiHz, peaks.sampleRate);
+
+        g.save();
+        g.beginPath();
+        g.rect(0, 0, w, h);
+        for (let c = 0; c < chans; c++) {
+          const top = c * laneH;
+          const yTop = top + laneH * (1 - hi);
+          const yBot = top + laneH * (1 - lo);
+          g.rect(x0, yTop, x1 - x0, yBot - yTop);
+        }
+        g.fillStyle = "rgba(6, 7, 8, 0.62)";
+        g.fill("evenodd");
+        g.restore();
+
+        g.strokeStyle = "rgba(245, 184, 67, 0.8)";
+        g.lineWidth = 1;
+        for (let c = 0; c < chans; c++) {
+          const top = c * laneH;
+          const yTop = Math.round(top + laneH * (1 - hi)) + 0.5;
+          const yBot = Math.round(top + laneH * (1 - lo)) + 0.5;
+          g.strokeRect(Math.round(x0) + 0.5, yTop, Math.round(x1 - x0), yBot - yTop);
+        }
+      }
+
       drawPlayhead();
       return;
     }
@@ -344,6 +390,7 @@ export function Waveform({
     playhead,
     offset,
     selection,
+    band,
     secPerPx,
   ]);
 
@@ -368,16 +415,33 @@ export function Waveform({
       Math.round((timeAt(clientX) - offset) * peaks.sampleRate),
     );
 
+  /**
+   * Frequency under the pointer, read from whichever channel lane it is
+   * over. Both lanes show the same frequency axis, so the channel only
+   * matters for working out how far down its own lane the pointer sits.
+   */
+  const hzAt = (clientY: number) => {
+    const rect = wrapRef.current!.getBoundingClientRect();
+    const chans = Math.min(2, peaks.channels);
+    const laneH = rect.height / chans;
+    const y = clientY - rect.top;
+    const within = ((y % laneH) + laneH) % laneH;
+    const bands = Math.max(1, Math.floor(laneH));
+    return bandFrequency((1 - within / laneH) * bands, bands, peaks.sampleRate);
+  };
+
   return (
     <div
       ref={wrapRef}
-      className="relative w-full cursor-text select-none"
-      style={{ height }}
+      className="relative w-full select-none"
+      style={{ height, cursor: view === "spectrogram" ? "crosshair" : "text" }}
       onPointerDown={(e) => {
         e.currentTarget.setPointerCapture(e.pointerId);
         const s = sampleAt(e.clientX);
         dragStart.current = s;
+        dragHz.current = view === "spectrogram" ? hzAt(e.clientY) : null;
         onSelect(null);
+        if (view === "spectrogram") onBand(null);
         onScrub(timeAt(e.clientX));
       }}
       onPointerMove={(e) => {
@@ -388,9 +452,19 @@ export function Waveform({
         // A few pixels of travel before it counts as a drag, so a plain
         // click places the cursor instead of making a zero-width selection.
         if (b - a > spp * 3) onSelect({ start: a, end: b });
+
+        if (view === "spectrogram" && dragHz.current !== null) {
+          const hz = hzAt(e.clientY);
+          const loHz = Math.min(dragHz.current, hz);
+          const hiHz = Math.max(dragHz.current, hz);
+          // A band narrower than a couple of semitones is almost certainly
+          // a horizontal drag that strayed, not a deliberate one.
+          if (hiHz / loHz > 1.12) onBand({ loHz, hiHz });
+        }
       }}
       onPointerUp={() => {
         dragStart.current = null;
+        dragHz.current = null;
       }}
     >
       <canvas ref={canvasRef} className="block" />

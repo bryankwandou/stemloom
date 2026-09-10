@@ -155,6 +155,55 @@ async function main() {
     return `two zoom steps in ${elapsed} ms`;
   });
 
+  // ---- Spectral repair ----
+  await check("dragging a box on the spectrogram picks a frequency band", async () => {
+    const box = await page.evaluate(() => {
+      const all = [...document.querySelectorAll("canvas")];
+      const c = all.sort((a, b) => b.width * b.height - a.width * a.height)[0];
+      const r = c.getBoundingClientRect();
+      return { x: r.x, y: r.y, w: r.width, h: r.height };
+    });
+    // A rectangle roughly a third of the way across and up the lane.
+    await page.mouse.move(box.x + box.w * 0.3, box.y + box.h * 0.55);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.w * 0.45, box.y + box.h * 0.3, { steps: 12 });
+    await page.mouse.up();
+    await page.waitForTimeout(400);
+    const text = await page.innerText("body");
+    const band = text.match(/([\d.]+\s*k?Hz)\s*–\s*([\d.]+\s*k?Hz)/);
+    assert(band, "no band readout appeared after the drag");
+    return `${band[1]} to ${band[2]}`;
+  });
+
+  await check("healing the selected band changes the audio and is undoable", async () => {
+    const heal = page.locator("button:has-text('Heal')").first();
+    assert(await heal.count(), "no Heal button in the spectrogram toolbar");
+    assert(await heal.isEnabled(), "Heal is disabled even with a box drawn");
+    await heal.click();
+    await page.waitForTimeout(2500);
+    const text = await page.innerText("body");
+    assert(/Healed/.test(text), "the status line never reported a repair");
+
+    // Undo has to put the samples back, or the operation is not safe to
+    // offer at all.
+    await page.keyboard.press("Control+z");
+    await page.waitForTimeout(800);
+    assert(/Undo/.test(await page.innerText("body")), "undo did not step back");
+    return text.match(/Healed [^
+]*/)[0].slice(0, 60);
+  });
+
+  await check("notching the band reports the cut it applied", async () => {
+    await page.click("button:has-text('Notch')");
+    await page.waitForTimeout(2500);
+    const text = await page.innerText("body");
+    assert(/Cut .*40 dB/.test(text), "no notch reported in the status line");
+    await page.keyboard.press("Control+z");
+    await page.waitForTimeout(800);
+    return text.match(/Cut [^
+]*/)[0].slice(0, 60);
+  });
+
   await check("returns to the waveform view", async () => {
     await page.click("button:has-text('Wave')");
     await page.waitForTimeout(400);

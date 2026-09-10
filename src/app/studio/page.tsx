@@ -24,10 +24,17 @@ import {
   set,
   undo,
   useProject,
+  type BandSelection,
   type LaneView,
 } from "@/lib/store";
+import { repairChannel, type RepairMode } from "@/lib/audio/spectral";
 
 const LANE_H = 96;
+
+/** Frequencies read better with a unit than with five digits. */
+function hz(v: number) {
+  return v >= 1000 ? `${(v / 1000).toFixed(v < 10000 ? 2 : 1)} kHz` : `${Math.round(v)} Hz`;
+}
 
 function timecode(sec: number) {
   const s = Math.max(0, sec);
@@ -193,6 +200,7 @@ export default function Studio() {
   const spp = useProject((s) => s.spp);
   const scrollSec = useProject((s) => s.scrollSec);
   const view = useProject((s) => s.view);
+  const band = useProject((s) => s.band);
   const playhead = useProject((s) => s.playhead);
   const playing = useProject((s) => s.playing);
   const masterChain = useProject((s) => s.masterChain);
@@ -295,6 +303,41 @@ export default function Studio() {
   }, [playing, engine, duration]);
 
   /* ---- Edit operations ------------------------------------------- */
+
+  /**
+   * Rewrite the selected rectangle of the transform.
+   *
+   * Runs on the main thread on purpose. It is fast enough on the few
+   * seconds a repair actually covers, and putting it in a worker would
+   * mean copying every channel across twice for an operation the user has
+   * just deliberately asked for and is waiting on anyway.
+   */
+  const repair = (mode: RepairMode) => {
+    if (!active || !band || !selection || selection.trackId !== active.id) return;
+    const src = active.buffer;
+    const out = ed.makeBuffer(src.numberOfChannels, src.length, src.sampleRate);
+    for (let c = 0; c < src.numberOfChannels; c++) {
+      out.copyToChannel(
+        repairChannel(
+          src.getChannelData(c),
+          selection.start,
+          selection.end,
+          band,
+          src.sampleRate,
+          mode,
+          { gainDb: -40 },
+        ),
+        c,
+      );
+    }
+    replaceAudio(
+      active.id,
+      out,
+      mode === "heal"
+        ? `Healed ${hz(band.loHz)}–${hz(band.hiHz)}`
+        : `Cut ${hz(band.loHz)}–${hz(band.hiHz)} by 40 dB`,
+    );
+  };
 
   const withActive = (
     fn: (buf: AudioBuffer, range: ed.Range | undefined) => AudioBuffer,
@@ -461,6 +504,32 @@ export default function Studio() {
           Silence
         </ToolButton>
 
+        {/* Spectral repair only makes sense against a picture of the
+            frequencies, so the controls live with that view rather than
+            sitting greyed out in the waveform one. */}
+        {view === "spectrogram" && (
+          <>
+            <div className="mx-1.5 h-4 w-px bg-line" />
+            <ToolButton
+              onClick={() => repair("heal")}
+              disabled={!hasSel || !band}
+              title="Rebuild the selected band from the sound either side of it"
+            >
+              Heal
+            </ToolButton>
+            <ToolButton
+              onClick={() => repair("attenuate")}
+              disabled={!hasSel || !band}
+              title="Pull the selected band down by 40 dB"
+            >
+              Notch
+            </ToolButton>
+            <span className="tnum ml-1 w-[112px] shrink-0 text-[10.5px] text-ink-faint">
+              {band ? `${hz(band.loHz)} – ${hz(band.hiHz)}` : "drag a box"}
+            </span>
+          </>
+        )}
+
         <div className="mx-1.5 h-4 w-px bg-line" />
 
         <ToolButton
@@ -590,6 +659,8 @@ export default function Studio() {
                   peaks={peaks[t.id]}
                   isActive={t.id === activeId}
                   view={view}
+                  band={band}
+                  onBand={(b) => set({ band: b })}
                   scrollSec={scrollSec}
                   spp={spp}
                   playhead={playhead}
@@ -762,7 +833,9 @@ function TrackLane({
   spp,
   playhead,
   selection,
+  band,
   onSelect,
+  onBand,
   onScrub,
   engine,
 }: {
@@ -774,7 +847,9 @@ function TrackLane({
   spp: number;
   playhead: number;
   selection: { start: number; end: number } | null;
+  band: BandSelection;
   onSelect: (r: { start: number; end: number } | null) => void;
+  onBand: (b: BandSelection) => void;
   onScrub: (sec: number) => void;
   engine: Engine;
 }) {
@@ -884,7 +959,9 @@ function TrackLane({
             playhead={playhead}
             offset={track.offset}
             selection={selection}
+            band={band}
             onSelect={onSelect}
+            onBand={onBand}
             onScrub={onScrub}
           />
         )}
