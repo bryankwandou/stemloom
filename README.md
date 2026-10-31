@@ -26,7 +26,10 @@ Stemloom aims at the gap: multitrack, offline, and unrestricted.
 - Peak normalisation, gain in dB, reverse, phase inversion, DC offset repair
 - Silence trimming with configurable threshold and attack padding
 - Channel swap and mid/side stereo width
-- Twenty-two effects across dynamics, EQ, time, modulation, character, and space
+- Twenty-two effects across dynamics, EQ, time, modulation, character, and space,
+  heard live as you play and rebuilt the moment one is added, removed, or
+  turned. Pitch and stretch change a track's length, so a track using them is
+  rendered first, the same way export renders it
 - Time stretch and pitch shift by WSOLA, independent of one another, alongside
   a tape-style control where speed and pitch move together
 - Microphone recording in two stages: arm and monitor, then roll
@@ -54,7 +57,6 @@ Stemloom aims at the gap: multitrack, offline, and unrestricted.
 Listing these honestly is more useful than hiding them.
 
 - MP3 and Ogg encoding
-- Automation lanes
 - MIDI, instruments, or anything that generates notes rather than editing them
 - An Android build
 
@@ -139,6 +141,14 @@ is not silence, the AAC file is walked frame by frame to confirm the ADTS
 sync words chain correctly, and recording is exercised against the
 synthetic input device Chrome offers behind its fake-media flags. It also
 confirms the editor still loads with the network switched off.
+
+Two of its checks listen rather than look. The harness taps whatever the
+page sends to the speakers and reads the spectrum: adding a ring modulator
+during playback has to put energy below 60 Hz, where a chord whose lowest
+note is 110 Hz has none, and removing it has to take that energy away
+again. Responsiveness is held to the longest task the main thread ran
+during analysis and zoom, not to how long a click took, since the second
+measures the test machine as much as the page.
 
 Playwright is deliberately not a dependency — it is a large download for
 something that runs occasionally — so point the script at an installation

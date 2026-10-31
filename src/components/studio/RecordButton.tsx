@@ -59,10 +59,10 @@ export function RecordButton({
     onStatus("Recording.");
   };
 
-  const finish = () => {
+  const finish = async () => {
     const rec = recRef.current;
     if (!rec) return;
-    const take = rec.stop();
+    const take = await rec.stop();
     if (take && take.duration > 0.05) {
       addTrack(`Take ${new Date().toLocaleTimeString()}`, take);
       onStatus(`Captured ${take.duration.toFixed(1)} seconds.`);

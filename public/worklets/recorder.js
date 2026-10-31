@@ -19,7 +19,12 @@ class RecorderProcessor extends AudioWorkletProcessor {
 
     this.port.onmessage = (e) => {
       if (e.data === "start") this.recording = true;
-      else if (e.data === "stop") this.recording = false;
+      else if (e.data === "stop") {
+        this.recording = false;
+        // Port messages arrive in order, so once the main thread sees
+        // this, every block captured before the stop is already there.
+        this.port.postMessage("stopped");
+      }
     };
   }
 

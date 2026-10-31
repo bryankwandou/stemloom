@@ -29,6 +29,7 @@ export class Recorder {
   private meterBuf = new Float32Array(1024);
 
   status: RecorderStatus = "idle";
+  private onStopped: (() => void) | null = null;
 
   constructor(ctx: AudioContext) {
     this.ctx = ctx;
@@ -73,7 +74,12 @@ export class Recorder {
     this.analyser = this.ctx.createAnalyser();
     this.analyser.fftSize = 2048;
 
-    this.node.port.onmessage = (e: MessageEvent<Float32Array[]>) => {
+    this.node.port.onmessage = (e: MessageEvent<Float32Array[] | "stopped">) => {
+      if (e.data === "stopped") {
+        this.onStopped?.();
+        this.onStopped = null;
+        return;
+      }
       const block = e.data;
       if (!block?.length) return;
       this.blocks.push(block);
@@ -101,11 +107,24 @@ export class Recorder {
     this.status = "recording";
   }
 
-  /** Stop and hand back the take. Returns null if nothing was captured. */
-  stop(): AudioBuffer | null {
+  /**
+   * Stop and hand back the take. Returns null if nothing was captured.
+   *
+   * Waits for the worklet to confirm. Assembling the take the moment the
+   * stop is sent loses whatever blocks are still crossing from the audio
+   * thread, which is the tail of every recording.
+   */
+  async stop(): Promise<AudioBuffer | null> {
     if (!this.node) return null;
+    const flushed = new Promise<void>((resolve) => {
+      this.onStopped = resolve;
+      // A suspended context never runs the worklet to answer.
+      setTimeout(resolve, 500);
+    });
     this.node.port.postMessage("stop");
     this.status = "stopped";
+    await flushed;
+    this.onStopped = null;
 
     if (this.frames === 0) return null;
 

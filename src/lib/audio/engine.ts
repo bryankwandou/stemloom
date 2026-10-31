@@ -62,6 +62,14 @@ export class Engine {
   private startOffset = 0;
   private playing = false;
   private meterBuf = new Float32Array(2048);
+  /** LFOs started inside live effects, which have to be stopped by hand. */
+  private liveSources: AudioScheduledSourceNode[] = [];
+  /**
+   * Tracks whose chain changes their length are rendered before playing,
+   * exactly as export renders them. Keyed on the buffer and the chain, so
+   * pressing play twice with nothing changed costs nothing the second time.
+   */
+  private rendered = new WeakMap<AudioBuffer, { key: string; out: AudioBuffer }>();
 
   /** Created lazily: browsers refuse to start a context without a gesture. */
   context(): AudioContext {
@@ -90,26 +98,68 @@ export class Engine {
     if (ctx.state === "suspended") await ctx.resume();
   }
 
-  async play(tracks: Track[], from: number, masterDb = 0) {
+  async play(
+    tracks: Track[],
+    from: number,
+    masterDb = 0,
+    masterChain: EffectInstance[] = [],
+  ) {
     await this.resume();
     this.stop(false);
 
+    // Everything slow happens before the clock is read. Rendering a
+    // stretched track can take a moment, and any await between reading
+    // currentTime and starting sources would put the tracks out of step.
+    const fx = await import("./effects");
+    const needsRender = (t: Track) =>
+      t.effects.some((e) => e.enabled && fx.OFFLINE_ONLY.has(e.id));
+    const buffers = new Map<string, AudioBuffer>();
+    for (const t of tracks) {
+      if (!needsRender(t)) continue;
+      const key = JSON.stringify(t.effects);
+      const hit = this.rendered.get(t.buffer);
+      if (hit && hit.key === key) {
+        buffers.set(t.id, hit.out);
+      } else {
+        const out = await fx.renderChain(t.buffer, t.effects);
+        this.rendered.set(t.buffer, { key, out });
+        buffers.set(t.id, out);
+      }
+    }
+
     const ctx = this.context();
     const anySolo = tracks.some((t) => t.soloed);
+
+    /** Run a chain live, returning its output, or the input if it is empty. */
+    const chain = (input: AudioNode, effects: EffectInstance[]) => {
+      let node = input;
+      for (const inst of effects) {
+        if (!inst.enabled || fx.OFFLINE_ONLY.has(inst.id)) continue;
+        const built = fx.buildEffect(ctx, inst, this.liveSources);
+        if (!built) continue;
+        node.connect(built.input);
+        node = built.output;
+      }
+      return node;
+    };
 
     this.masterGain = ctx.createGain();
     this.masterGain.gain.value = dbToGain(masterDb);
     this.masterAnalyser = ctx.createAnalyser();
     this.masterAnalyser.fftSize = 2048;
-    this.masterGain.connect(this.masterAnalyser);
+    // Master effects sit after the master fader, where export puts them.
+    // Length-changing effects cannot run on a live stream and are left to
+    // export; on the master bus they are rare enough not to pre-render.
+    chain(this.masterGain, masterChain).connect(this.masterAnalyser);
     this.masterAnalyser.connect(ctx.destination);
 
     for (const t of tracks) {
       // Solo is exclusive: if anything is soloed, everything else is out.
       const audible = anySolo ? t.soloed && !t.muted : !t.muted;
 
+      const played = buffers.get(t.id) ?? t.buffer;
       const source = ctx.createBufferSource();
-      source.buffer = t.buffer;
+      source.buffer = played;
 
       const auto = t.automation ?? emptyAutomation();
       const local = from - t.offset;
@@ -132,12 +182,18 @@ export class Engine {
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 2048;
 
-      source.connect(env).connect(gain).connect(panner).connect(analyser);
+      // Effects first, then the envelope and fader, the order export uses.
+      // A pre-rendered track already carries its whole chain.
+      chain(source, played === t.buffer ? t.effects : [])
+        .connect(env)
+        .connect(gain)
+        .connect(panner)
+        .connect(analyser);
       analyser.connect(this.masterGain);
 
       // A track whose start lies ahead of the playhead is scheduled into
       // the future; one that starts behind it is played from part-way in.
-      if (local >= t.buffer.duration) {
+      if (local >= played.duration) {
         // Entirely in the past. Nothing to hear.
       } else if (local >= 0) {
         source.start(ctx.currentTime, local);
@@ -154,6 +210,16 @@ export class Engine {
   }
 
   stop(resetPosition = true) {
+    for (const s of this.liveSources) {
+      try {
+        s.stop();
+      } catch {
+        // Never started or already stopped.
+      }
+      s.disconnect();
+    }
+    this.liveSources = [];
+    this.masterGain?.disconnect();
     for (const n of this.nodes.values()) {
       try {
         n.source.stop();

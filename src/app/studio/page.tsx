@@ -278,10 +278,32 @@ export default function Studio() {
       set({ playing: false, playhead: engine.position() });
     } else {
       if (s.tracks.length === 0) return;
-      await engine.play(s.tracks, s.playhead, s.masterDb);
+      await engine.play(s.tracks, s.playhead, s.masterDb, s.masterChain);
       set({ playing: true });
     }
   }, [engine]);
+
+  // An effect added, removed, or turned while playing has to be heard.
+  // The graph is rebuilt from the current position; a parameter moving is
+  // a few milliseconds of rebuild, which is cheaper than keeping a map from
+  // every slider to the node it lives on.
+  const fxKey = useMemo(
+    () => JSON.stringify([tracks.map((t) => t.effects), masterChain]),
+    [tracks, masterChain],
+  );
+  const lastFx = useRef(fxKey);
+  useEffect(() => {
+    if (lastFx.current === fxKey) return;
+    lastFx.current = fxKey;
+    if (!engine.isPlaying) return;
+    // Debounced so a slider drag rebuilds once it pauses, not per pixel.
+    const t = window.setTimeout(() => {
+      if (!engine.isPlaying) return;
+      const s = getState();
+      void engine.play(s.tracks, engine.position(), s.masterDb, s.masterChain);
+    }, 60);
+    return () => window.clearTimeout(t);
+  }, [fxKey, engine]);
 
   const stopAll = useCallback(() => {
     engine.stop();

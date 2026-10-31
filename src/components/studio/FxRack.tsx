@@ -191,7 +191,8 @@ export function FxRack({
           <p className="px-1 py-6 text-center text-[11.5px] leading-relaxed text-ink-faint">
             No effects yet.
             <br />
-            Everything renders offline, on this machine.
+            You hear them as you play, and export
+            renders the same chain on this machine.
           </p>
         )}
         {chain.map((inst) => (

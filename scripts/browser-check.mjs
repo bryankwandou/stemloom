@@ -105,6 +105,31 @@ async function main() {
   });
   page = await ctx.newPage();
 
+  // A tap on whatever the live context sends to the speakers. Without it
+  // the harness could only prove an effect is wired, not that it is heard;
+  // with it, a check can measure the spectrum actually leaving the page.
+  // Offline contexts are left alone, since export is checked by its bytes.
+  await page.addInitScript(() => {
+    const connect = AudioNode.prototype.connect;
+    AudioNode.prototype.connect = function (dest, ...rest) {
+      if (
+        dest instanceof AudioDestinationNode &&
+        typeof AudioContext !== "undefined" &&
+        this.context instanceof AudioContext
+      ) {
+        let tap = window.__tap;
+        if (!tap || tap.context !== this.context) {
+          tap = this.context.createAnalyser();
+          tap.fftSize = 4096;
+          tap.smoothingTimeConstant = 0;
+          window.__tap = tap;
+        }
+        connect.call(this, tap);
+      }
+      return connect.call(this, dest, ...rest);
+    };
+  });
+
   page.on("console", (m) => {
     if (m.type() === "error") errors.push(m.text().slice(0, 200));
   });
@@ -137,6 +162,18 @@ async function main() {
 
   // ---- Spectrogram ----
   await check("spectrogram renders through the worker", async () => {
+    // Watch the main thread from before analysis starts, so the next check
+    // can say how long it was ever blocked rather than time a click.
+    await page.evaluate(() => {
+      window.__long = [];
+      window.__t0 = performance.now();
+      new PerformanceObserver((list) => {
+        for (const e of list.getEntries()) {
+          window.__long.push(e.duration);
+          window.__longAt = [...(window.__longAt ?? []), Math.round(e.startTime - window.__t0) + ":" + Math.round(e.duration)];
+        }
+      }).observe({ type: "longtask" });
+    });
     await page.click("button:has-text('Spectrum')");
     // The worker has to load, analyse, and post back before anything
     // appears. On a cold server the worker chunk alone can take a couple
@@ -153,12 +190,18 @@ async function main() {
   });
 
   await check("main thread stays responsive during analysis", async () => {
-    const t = Date.now();
+    // Timing the clicks themselves measured the harness as much as the
+    // page: on a loaded machine the round trip alone reached two seconds
+    // while the page never blocked for more than 53 ms. Long tasks are
+    // what a person feels, so those are what is held to a limit.
     await page.click("button[title='Zoom in (+)']");
     await page.click("button[title='Zoom in (+)']");
-    const elapsed = Date.now() - t;
-    assert(elapsed < 1500, `two zoom clicks took ${elapsed} ms`);
-    return `two zoom steps in ${elapsed} ms`;
+    await page.waitForTimeout(1500);
+    const long = await page.evaluate(() => window.__long ?? []);
+    const worst = Math.round(Math.max(0, ...long));
+    const at = await page.evaluate(() => (window.__longAt ?? []).join(" "));
+    assert(worst < 250, `the main thread blocked for ${worst} ms (start:ms ${at})`);
+    return `${long.length} long task(s), worst ${worst} ms, across analysis and two zooms`;
   });
 
   // ---- Spectral repair ----
@@ -307,6 +350,58 @@ async function main() {
     return "no scheduling errors";
   });
 
+  // ---- Live effects ----
+  /**
+   * Share of the playing signal's power below 60 Hz. The test chord's
+   * lowest note is 110 Hz, so almost nothing lives down there until an
+   * effect puts it there. A ratio rather than a level, because the
+   * envelope drawn above leaves the track quiet and that must not matter.
+   */
+  async function lowShare() {
+    return page.evaluate(async () => {
+      const tap = window.__tap;
+      if (!tap) return null;
+      const bins = new Float32Array(tap.frequencyBinCount);
+      const hzPerBin = tap.context.sampleRate / tap.fftSize;
+      let lo = 0;
+      let all = 0;
+      for (let k = 0; k < 12; k++) {
+        tap.getFloatFrequencyData(bins);
+        for (let i = 1; i < bins.length; i++) {
+          const p = Math.pow(10, bins[i] / 10);
+          all += p;
+          if (i * hzPerBin < 60) lo += p;
+        }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      return all > 0 ? lo / all : null;
+    });
+  }
+
+  await check("an effect added during playback is heard straight away", async () => {
+    await page.keyboard.press("Home");
+    await page.keyboard.press("Space");
+    await page.waitForTimeout(500);
+    const before = await lowShare();
+    assert(before !== null, "nothing reached the speakers");
+
+    // A ring modulator at its default 180 Hz turns the 220 Hz note into
+    // 40 Hz and 400 Hz. Nothing else in the chain could put energy at 40.
+    await page.click("button:has-text('Add')");
+    await page.click("button:has-text('Ring Modulator')");
+    await page.waitForTimeout(700);
+    const during = await lowShare();
+
+    await page.click("button[aria-label='Remove Ring Modulator']");
+    await page.waitForTimeout(700);
+    const after = await lowShare();
+    await page.keyboard.press("Space");
+
+    const db = (x) => (10 * Math.log10(x)).toFixed(1);
+    assert(during > before * 10, `the low band moved only from ${db(before)} to ${db(during)} dB`);
+    assert(after < during / 10, `removing the effect left the low band at ${db(after)} dB`);
+    return `energy below 60 Hz ${db(before)} → ${db(during)} → ${db(after)} dB`;
+  });
 
   // ---- Export ----
   await check("WAV export produces a valid RIFF file", async () => {
@@ -393,6 +488,25 @@ async function main() {
     const before = await page.locator("canvas").count();
     await page.click("button:has-text('Record')");
     await page.waitForSelector("button:has-text('Roll')", { timeout: 20000 });
+    // Wait for the arming meter to show signal, as a person would. The
+    // fake device takes a moment to start delivering, and rolling before
+    // it does records silence through no fault of the recorder.
+    await page.waitForFunction(
+      () => {
+        const c = [...document.querySelectorAll("canvas")].find(
+          (n) => n.style.width === "54px",
+        );
+        if (!c) return false;
+        const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
+        for (let i = 0; i < d.length; i += 4) {
+          // The meter's green, amber, or red fill, not the grey track.
+          if (d[i + 3] > 200 && (d[i + 1] > 150 || d[i] > 200)) return true;
+        }
+        return false;
+      },
+      null,
+      { timeout: 10000 },
+    );
     await page.click("button:has-text('Roll')");
     await page.waitForTimeout(1800);
     await page.click("button:has-text('Stop')");
@@ -427,6 +541,17 @@ async function main() {
       return !!r && !!(r.active || r.installing || r.waiting);
     });
     assert(reg, "no service worker registration");
+    // Registered is not the same as in charge. Going offline while the
+    // worker is still installing tests the network, not the cache.
+    await page.evaluate(() => navigator.serviceWorker.ready);
+    await page.waitForFunction(() => !!navigator.serviceWorker.controller, null, {
+      timeout: 10000,
+    });
+    await page.waitForFunction(
+      async () => !!(await caches.match("/studio")),
+      null,
+      { timeout: 10000, polling: 250 },
+    );
     await ctx.setOffline(true);
     const res = await page.goto(`${BASE}/studio`, { waitUntil: "domcontentloaded" });
     await ctx.setOffline(false);

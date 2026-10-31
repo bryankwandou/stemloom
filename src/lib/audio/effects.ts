@@ -376,7 +376,7 @@ export const EFFECTS: EffectSpec[] = [
 ];
 
 /** Handled outside the node graph because they change the buffer length. */
-const OFFLINE_ONLY = new Set(["pitch", "pitchshift", "stretch"]);
+export const OFFLINE_ONLY = new Set(["pitch", "pitchshift", "stretch"]);
 
 export const EFFECT_BY_ID = new Map(EFFECTS.map((e) => [e.id, e]));
 
@@ -390,16 +390,22 @@ export function defaultValues(id: string): Record<string, number> {
 /* Graph construction                                                  */
 /* ------------------------------------------------------------------ */
 
-type Chain = { input: AudioNode; output: AudioNode };
+export type Chain = { input: AudioNode; output: AudioNode };
 
 /**
  * Build one effect as an input/output pair. Wet/dry is handled inside each
  * builder that needs it, so the caller can treat every effect identically
  * and just chain outputs into inputs.
  */
-function buildEffect(
+export function buildEffect(
   ctx: BaseAudioContext,
   inst: EffectInstance,
+  /**
+   * Collects any oscillator the effect starts. Offline it does not matter,
+   * since the context dies with the render; live, an LFO left running after
+   * stop keeps its whole subgraph alive and they pile up with every play.
+   */
+  live?: AudioScheduledSourceNode[],
 ): Chain | null {
   const v = inst.values;
   const input = ctx.createGain();
@@ -552,6 +558,7 @@ function buildEffect(
       depth.gain.value = v.depth / 1000;
       lfo.connect(depth).connect(d.delayTime);
       lfo.start();
+      live?.push(lfo);
 
       input.connect(d);
 
@@ -576,6 +583,7 @@ function buildEffect(
       lfoGain.gain.value = depth / 2;
       lfo.connect(lfoGain).connect(amp.gain);
       lfo.start();
+      live?.push(lfo);
 
       input.connect(amp);
       return { input, output: amp };
@@ -619,6 +627,7 @@ function buildEffect(
       depth.gain.value = v.spread;
       lfo.connect(depth);
       lfo.start();
+      live?.push(lfo);
 
       let node: AudioNode = input;
       let last: BiquadFilterNode | null = null;
@@ -658,6 +667,7 @@ function buildEffect(
       depth.gain.value = Math.min(1, v.depth / 100);
       lfo.connect(depth).connect(panner.pan);
       lfo.start();
+      live?.push(lfo);
 
       input.connect(panner);
       return { input, output: panner };
@@ -675,6 +685,7 @@ function buildEffect(
       carrier.frequency.value = v.freq;
       carrier.connect(ring.gain);
       carrier.start();
+      live?.push(carrier);
 
       input.connect(ring);
       return wetDry(ring, v.mix);

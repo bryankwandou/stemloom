@@ -12,7 +12,9 @@
  * your audio never leaves the machine.
  */
 
-const CACHE = "stemloom-v1";
+// Bumped when a cached file changes shape, such as the recorder worklet
+// learning to acknowledge a stop.
+const CACHE = "stemloom-v2";
 
 // The shell we want available before the user ever goes offline.
 const PRECACHE = ["/", "/studio", "/manifest.webmanifest", "/icon.svg"];
