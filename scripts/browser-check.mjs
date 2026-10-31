@@ -390,6 +390,80 @@ async function main() {
     return `moved to ${m[1]} s; old start went from ${litBefore} to ${litAfter} bright pixels; undone`;
   });
 
+  // ---- Arranging ----
+  const laneCount = () => page.locator("input[aria-label$=' gain']").count();
+  const clickLaneAt = async (frac) => {
+    const box = await page.evaluate(() => {
+      const all = [...document.querySelectorAll("canvas")];
+      const c = all.sort((a, b) => b.width * b.height - a.width * a.height)[0];
+      const r = c.getBoundingClientRect();
+      return { x: r.x, y: r.y, w: r.width, h: r.height };
+    });
+    await page.mouse.click(box.x + box.w * frac, box.y + box.h * 0.7);
+  };
+
+  await check("S splits the active track at the playhead into two", async () => {
+    const before = await laneCount();
+    await clickLaneAt(0.12);
+    await page.keyboard.press("s");
+    await page.waitForTimeout(300);
+    const text = await page.innerText("body");
+    const m = text.match(/Split .* at ([\d.]+) s/);
+    assert(m, "no split reported");
+    const after = await laneCount();
+    assert(after === before + 1, `lanes went from ${before} to ${after}`);
+    await page.keyboard.press("Control+z");
+    await page.waitForTimeout(300);
+    assert((await laneCount()) === before, "undo did not rejoin the track");
+    return `split at ${m[1]} s, ${before} → ${after} lanes, undone`;
+  });
+
+  await check("Duplicate copies the active track", async () => {
+    const before = await laneCount();
+    await page.click("button:has-text('Duplicate')");
+    await page.waitForTimeout(300);
+    const after = await laneCount();
+    assert(after === before + 1, `lanes went from ${before} to ${after}`);
+    assert(/Duplicated/.test(await page.innerText("body")), "no duplicate reported");
+    await page.keyboard.press("Control+z");
+    await page.waitForTimeout(300);
+    return `${before} → ${after} lanes, undone`;
+  });
+
+  await check("markers drop with M, jump with ], and remove on double-click", async () => {
+    await clickLaneAt(0.1);
+    await page.keyboard.press("m");
+    await clickLaneAt(0.2);
+    await page.keyboard.press("m");
+    await page.waitForTimeout(200);
+    const tags = page.locator("[data-marker] button");
+    assert((await tags.count()) === 2, `expected 2 markers, saw ${await tags.count()}`);
+    const second = await tags.nth(1).getAttribute("title");
+    const want = Number(second.match(/at ([\d.]+) s/)[1]);
+
+    // From the first marker, ] lands on the second.
+    await tags.nth(0).click();
+    await page.keyboard.press("]");
+    await page.waitForTimeout(200);
+    const clock = await page.evaluate(() => {
+      const el = [...document.querySelectorAll("span,div")].find((n) =>
+        /^\d{2}:\d{2}[.:]\d+/.test(n.textContent?.trim() ?? ""),
+      );
+      const [mm, rest] = el.textContent.trim().split(":");
+      return Number(mm) * 60 + parseFloat(rest);
+    });
+    assert(Math.abs(clock - want) < 0.01, `playhead at ${clock} s, marker at ${want} s`);
+
+    await tags.nth(0).dblclick();
+    await page.waitForTimeout(200);
+    const left = await page.locator("[data-marker]").count();
+    assert(left === 1, `double-click left ${left} markers`);
+    // Undo the removal and both drops, so later checks see a clean timeline.
+    for (let k = 0; k < 3; k++) await page.keyboard.press("Control+z");
+    await page.waitForTimeout(200);
+    return `two dropped, ] jumped to ${want.toFixed(3)} s, one removed`;
+  });
+
   // ---- Automation ----
   await check("a volume envelope takes points, drags, and removes them", async () => {
     await page.click("button[aria-pressed]:has-text('Volume')");

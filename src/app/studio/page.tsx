@@ -14,7 +14,12 @@ import type { Lane } from "@/lib/audio/automation";
 import { Engine, type Track } from "@/lib/audio/engine";
 import * as ed from "@/lib/audio/edits";
 import {
+  addMarker,
   addTrack,
+  duplicateTrack,
+  neighbourMarker,
+  removeMarker,
+  splitTrack,
   canRedo,
   canUndo,
   getState,
@@ -209,6 +214,7 @@ export default function Studio() {
   const band = useProject((s) => s.band);
   const automationLane = useProject((s) => s.automationLane);
   const moveTool = useProject((s) => s.moveTool);
+  const markers = useProject((s) => s.markers);
   const playhead = useProject((s) => s.playhead);
   const playing = useProject((s) => s.playing);
   const masterChain = useProject((s) => s.masterChain);
@@ -450,6 +456,35 @@ export default function Studio() {
     worker.postMessage(req, [...channels, ...noise]);
   };
 
+  /* ---- Arranging ------------------------------------------------- */
+
+  /** Where the playhead really is, including while it is moving. */
+  const nowAt = () => (engine.isPlaying ? engine.position() : getState().playhead);
+
+  /** Move the playhead; a running transport restarts from there. */
+  const jumpTo = (t: number) => {
+    const s = getState();
+    set({ playhead: t });
+    if (engine.isPlaying) void engine.play(s.tracks, t, s.masterDb, s.masterChain);
+    else engine.seek(t);
+  };
+
+  const split = () => {
+    if (!active) return;
+    const at = nowAt();
+    if (!splitTrack(active.id, at)) {
+      set({ status: "Put the playhead inside the active track to split it." });
+    }
+  };
+
+  const markHere = () => addMarker(nowAt());
+
+  const toMarker = (dir: 1 | -1) => {
+    const m = neighbourMarker(nowAt(), dir);
+    if (m) jumpTo(m.t);
+    else set({ status: dir > 0 ? "No marker after the playhead." : "No marker before the playhead." });
+  };
+
   const withActive = (
     fn: (buf: AudioBuffer, range: ed.Range | undefined) => AudioBuffer,
     label: string,
@@ -509,6 +544,14 @@ export default function Studio() {
         paste();
       } else if (e.key === "Delete" || e.key === "Backspace") {
         cutSelection();
+      } else if (!mod && e.key.toLowerCase() === "s") {
+        split();
+      } else if (!mod && e.key.toLowerCase() === "m") {
+        markHere();
+      } else if (e.key === "]") {
+        toMarker(1);
+      } else if (e.key === "[") {
+        toMarker(-1);
       } else if (e.key === "Home") {
         set({ playhead: 0 });
         engine.seek(0);
@@ -732,6 +775,22 @@ export default function Studio() {
           Swap L/R
         </ToolButton>
 
+        <div className="mx-1.5 h-4 w-px bg-line" />
+
+        <ToolButton onClick={split} disabled={!active} title="Split the active track at the playhead (S)">
+          Split
+        </ToolButton>
+        <ToolButton
+          onClick={() => active && duplicateTrack(active.id)}
+          disabled={!active}
+          title="Copy the active track, effects and envelopes included"
+        >
+          Duplicate
+        </ToolButton>
+        <ToolButton onClick={markHere} disabled={tracks.length === 0} title="Drop a marker at the playhead (M). [ and ] jump between markers">
+          Marker
+        </ToolButton>
+
         <div className="ml-auto flex items-center gap-1">
           {/* What the pointer does in a lane: select audio, slide the
               track, or draw one of its envelopes. One switch rather than
@@ -842,7 +901,8 @@ export default function Studio() {
                 </div>
               </div>
             ) : (
-              tracks.map((t) => (
+              <div className="relative">
+              {tracks.map((t) => (
                 <TrackLane
                   key={t.id}
                   track={t}
@@ -873,7 +933,37 @@ export default function Studio() {
                   }}
                   engine={engine}
                 />
-              ))
+              ))}
+
+              {/* Markers run across every lane. Only the tag at the top
+                  takes the pointer, so a line never gets in the way of
+                  selecting audio underneath it. */}
+              <div className="pointer-events-none absolute inset-y-0 left-[189px] right-0 overflow-hidden">
+                {markers.map((m, i) => {
+                  const rate = tracks[0]?.buffer.sampleRate ?? 48000;
+                  const x = (m.t - scrollSec) / (spp / rate);
+                  if (x < -20) return null;
+                  return (
+                    <div
+                      key={m.id}
+                      data-marker={i + 1}
+                      className="absolute inset-y-0"
+                      style={{ left: x }}
+                    >
+                      <div className="absolute inset-y-0 w-px bg-signal/60" />
+                      <button
+                        className="tnum pointer-events-auto absolute top-0 -translate-x-1/2 rounded-b-[3px] bg-signal px-1 text-[9.5px] font-medium leading-[14px] text-black"
+                        title={`Marker ${i + 1} at ${m.t.toFixed(3)} s. Click to jump, double-click to remove`}
+                        onClick={() => jumpTo(m.t)}
+                        onDoubleClick={() => removeMarker(m.id)}
+                      >
+                        {i + 1}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+              </div>
             )}
           </div>
 

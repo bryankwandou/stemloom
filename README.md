@@ -21,6 +21,9 @@ Stemloom aims at the gap: multitrack, offline, and unrestricted.
 
 - Multitrack timeline with per-track gain, pan, mute, and solo, and a move
   tool that slides a track along the timeline (Shift snaps to tenths)
+- Split a track at the playhead (S) into two that can be slid apart,
+  duplicate a track with its effects and envelopes, and drop markers (M)
+  to jump between with [ and ]. Markers are saved with the project
 - Noise reduction from a learned profile: select a stretch of noise alone,
   learn it, then take it out of the whole track at 6 to 24 dB. Runs in a
   worker, so a long track does not freeze the page

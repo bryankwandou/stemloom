@@ -49,6 +49,8 @@ type StoredProject = ProjectSummary & {
   tracks: StoredTrack[];
   masterChain: EffectInstance[];
   masterDb: number;
+  /** Absent in projects saved before markers existed. */
+  markers?: { id: string; t: number }[];
 };
 
 function open(): Promise<IDBDatabase> {
@@ -92,6 +94,7 @@ export async function saveProject(
   masterChain: EffectInstance[],
   masterDb: number,
   existingId?: string,
+  markers: { id: string; t: number }[] = [],
 ): Promise<string> {
   const id = existingId ?? `p${Date.now().toString(36)}`;
   let bytes = 0;
@@ -132,6 +135,7 @@ export async function saveProject(
     tracks: stored,
     masterChain,
     masterDb,
+    markers,
   };
 
   await tx("readwrite", (s) => s.put(record));
@@ -157,6 +161,7 @@ export type LoadedProject = {
   tracks: Track[];
   masterChain: EffectInstance[];
   masterDb: number;
+  markers: { id: string; t: number }[];
 };
 
 export async function loadProject(id: string): Promise<LoadedProject | null> {
@@ -197,6 +202,7 @@ export async function loadProject(id: string): Promise<LoadedProject | null> {
     tracks,
     masterChain: rec.masterChain ?? [],
     masterDb: rec.masterDb ?? 0,
+    markers: rec.markers ?? [],
   };
 }
 

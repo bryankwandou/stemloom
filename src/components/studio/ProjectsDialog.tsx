@@ -21,7 +21,7 @@ import {
   storageUsage,
   type ProjectSummary,
 } from "@/lib/persist";
-import { loadTracks } from "@/lib/store";
+import { getState, loadTracks } from "@/lib/store";
 
 function bytes(n: number) {
   if (n < 1024) return `${n} B`;
@@ -84,7 +84,7 @@ export function ProjectsDialog({
     setBusy(true);
     try {
       const label = name.trim() || `Session ${new Date().toLocaleString()}`;
-      await saveProject(label, tracks, masterChain, masterDb);
+      await saveProject(label, tracks, masterChain, masterDb, undefined, getState().markers);
       setName("");
       await refresh();
       onStatus(`Saved as "${label}".`);
@@ -108,6 +108,7 @@ export function ProjectsDialog({
         proj.masterChain,
         proj.masterDb,
         `Opened "${proj.name}"`,
+        proj.markers,
       );
       onClose();
     } catch {

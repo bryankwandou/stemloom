@@ -35,6 +35,14 @@ const GROUPS: { title: string; keys: [string, string][] }[] = [
     ],
   },
   {
+    title: "Arranging",
+    keys: [
+      ["S", "Split the active track at the playhead"],
+      ["M", "Drop a marker at the playhead"],
+      ["[  ]", "Jump to the previous or next marker"],
+    ],
+  },
+  {
     title: "View",
     keys: [
       ["+", "Zoom in"],
