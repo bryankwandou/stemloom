@@ -12,6 +12,7 @@
  */
 
 import type { Track } from "./audio/engine";
+import { emptyAutomation, type Automation } from "./audio/automation";
 import type { EffectInstance } from "./audio/effects";
 
 const DB_NAME = "stemloom";
@@ -37,6 +38,8 @@ type StoredTrack = {
   soloed: boolean;
   color: string;
   effects: EffectInstance[];
+  /** Absent in projects saved before automation existed. */
+  automation?: Automation;
   sampleRate: number;
   length: number;
   channels: ArrayBuffer[];
@@ -112,6 +115,7 @@ export async function saveProject(
       soloed: t.soloed,
       color: t.color,
       effects: t.effects,
+      automation: t.automation,
       sampleRate: t.buffer.sampleRate,
       length: t.buffer.length,
       channels,
@@ -183,6 +187,7 @@ export async function loadProject(id: string): Promise<LoadedProject | null> {
       muted: st.muted,
       soloed: st.soloed,
       effects: st.effects ?? [],
+      automation: st.automation ?? emptyAutomation(),
       color: st.color,
     };
   });

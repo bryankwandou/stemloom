@@ -138,9 +138,15 @@ async function main() {
   // ---- Spectrogram ----
   await check("spectrogram renders through the worker", async () => {
     await page.click("button:has-text('Spectrum')");
-    // The worker has to analyse and post back before anything appears.
-    await page.waitForTimeout(2500);
-    const s = await canvasStats();
+    // The worker has to load, analyse, and post back before anything
+    // appears. On a cold server the worker chunk alone can take a couple
+    // of seconds, so poll rather than guess a single fixed wait.
+    let s = null;
+    const until = Date.now() + 10000;
+    do {
+      await page.waitForTimeout(500);
+      s = await canvasStats();
+    } while (s && s.distinct <= 6 && Date.now() < until);
     assert(s.lit > 20, `spectrogram looks blank (${s.lit} lit)`);
     assert(s.distinct > 6, `only ${s.distinct} distinct colours, expected a ramp`);
     return `${s.lit} lit, ${s.distinct} distinct colours`;
@@ -239,6 +245,66 @@ async function main() {
     const status = await page.textContent("body");
     assert(/Undo|Ready|Normalis/i.test(status), "no status change");
     return "history responded";
+  });
+
+  // ---- Automation ----
+  await check("a volume envelope takes points, drags, and removes them", async () => {
+    await page.click("button[aria-pressed]:has-text('Volume')");
+    const lane = page.locator("svg[data-automation-lane='gain']").first();
+    await lane.waitFor({ timeout: 3000 });
+    const r = await lane.boundingBox();
+
+    // Two presses well apart: one on the 0 dB line, one low in the lane.
+    await page.mouse.click(r.x + r.width * 0.25, r.y + r.height * 0.18);
+    await page.mouse.click(r.x + r.width * 0.6, r.y + r.height * 0.85);
+    await page.waitForTimeout(300);
+    let pts = await page.locator("svg[data-automation-lane='gain'] circle").count();
+    assert(pts >= 2, `expected two points, saw ${pts}`);
+    const status = await page.innerText("body");
+    assert(/Volume envelope, 2 points/.test(status), "status did not report the envelope");
+
+    // Drag the second point upward; the status should stay a single step.
+    const c = page.locator("[data-automation-point='1']").first();
+    const cb = await c.boundingBox();
+    await page.mouse.move(cb.x + cb.width / 2, cb.y + cb.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(cb.x + cb.width / 2 + 20, r.y + r.height * 0.5, { steps: 8 });
+    await page.mouse.up();
+    const moved = await c.boundingBox();
+    assert(moved.y < cb.y - 10, "the point did not follow the drag");
+
+    // Double-click removes; undo brings it back.
+    await page.mouse.dblclick(moved.x + moved.width / 2, moved.y + moved.height / 2);
+    await page.waitForTimeout(300);
+    pts = await page.locator("svg[data-automation-lane='gain'] circle").count();
+    assert(pts === 1, `double-click left ${pts} points`);
+    await page.keyboard.press("Control+z");
+    await page.waitForTimeout(300);
+    pts = await page.locator("svg[data-automation-lane='gain'] circle").count();
+    assert(pts === 2, `undo restored ${pts} points, not 2`);
+    return "added 2, dragged 1, removed and restored";
+  });
+
+  await check("the envelope stays visible with editing switched off", async () => {
+    await page.click("button[aria-pressed]:has-text('Off')");
+    await page.waitForTimeout(200);
+    const shown = await page.locator("svg[data-automation-lane='gain']").count();
+    assert(shown > 0, "the drawn line vanished when editing was turned off");
+    const passes = await page.$eval(
+      "svg[data-automation-lane='gain']",
+      (el) => getComputedStyle(el).pointerEvents,
+    );
+    assert(passes === "none", "the idle overlay still swallows clicks");
+    return "drawn faintly, clicks pass through";
+  });
+
+  await check("playback runs with an envelope on the track", async () => {
+    await page.keyboard.press("Space");
+    await page.waitForTimeout(900);
+    await page.keyboard.press("Space");
+    const fresh = errors.filter((e) => /AudioParam|automation|schedule/i.test(e));
+    assert(fresh.length === 0, fresh[0] ?? "");
+    return "no scheduling errors";
   });
 
 

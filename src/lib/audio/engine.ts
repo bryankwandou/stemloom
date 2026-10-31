@@ -9,6 +9,11 @@
  */
 
 import type { EffectInstance } from "./effects";
+import {
+  emptyAutomation,
+  schedule,
+  type Automation,
+} from "./automation";
 
 export type Track = {
   id: string;
@@ -22,6 +27,8 @@ export type Track = {
   muted: boolean;
   soloed: boolean;
   effects: EffectInstance[];
+  /** Envelopes drawn over the track, in track-local seconds. */
+  automation: Automation;
   color: string;
 };
 
@@ -34,9 +41,15 @@ const dbToGain = (db: number) => Math.pow(10, db / 20);
 
 type TrackNodes = {
   source: AudioBufferSourceNode;
+  /** Carries the gain envelope, so the fader can move on top of it. */
+  env: GainNode;
   gain: GainNode;
   panner: StereoPannerNode;
   analyser: AnalyserNode;
+  /** Context time at which this track's own clock read zero. */
+  origin: number;
+  /** A drawn pan line owns the knob; turning it would fight the ramps. */
+  panAuto: boolean;
 };
 
 export class Engine {
@@ -98,21 +111,32 @@ export class Engine {
       const source = ctx.createBufferSource();
       source.buffer = t.buffer;
 
-      const gain = ctx.createGain();
-      gain.gain.value = audible ? dbToGain(t.gainDb) : 0;
+      const auto = t.automation ?? emptyAutomation();
+      const local = from - t.offset;
+      // Context time at which this track's own clock reads zero. It sits in
+      // the past for a track already playing, which is correct: the
+      // envelope is anchored to the track, not to when playback started.
+      const origin = ctx.currentTime - local;
 
+      const env = ctx.createGain();
+      const gain = ctx.createGain();
       const panner = ctx.createStereoPanner();
-      panner.pan.value = t.pan;
+
+      // The gain envelope is relative to the fader, in decibels. Keeping it
+      // on its own node means a fader move during playback cannot cancel
+      // ramps the envelope already scheduled on the same parameter.
+      schedule(env.gain, auto.gain, origin, local, ctx.currentTime, 0, dbToGain);
+      gain.gain.value = audible ? dbToGain(t.gainDb) : 0;
+      schedule(panner.pan, auto.pan, origin, local, ctx.currentTime, t.pan);
 
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 2048;
 
-      source.connect(gain).connect(panner).connect(analyser);
+      source.connect(env).connect(gain).connect(panner).connect(analyser);
       analyser.connect(this.masterGain);
 
       // A track whose start lies ahead of the playhead is scheduled into
       // the future; one that starts behind it is played from part-way in.
-      const local = from - t.offset;
       if (local >= t.buffer.duration) {
         // Entirely in the past. Nothing to hear.
       } else if (local >= 0) {
@@ -121,7 +145,7 @@ export class Engine {
         source.start(ctx.currentTime - local);
       }
 
-      this.nodes.set(t.id, { source, gain, panner, analyser });
+      this.nodes.set(t.id, { source, env, gain, panner, analyser, origin, panAuto: auto.pan.length > 0 });
     }
 
     this.startOffset = from;
@@ -167,8 +191,23 @@ export class Engine {
 
   setTrackPan(id: string, pan: number) {
     const n = this.nodes.get(id);
-    if (!n || !this.ctx) return;
+    if (!n || !this.ctx || n.panAuto) return;
     n.panner.pan.setTargetAtTime(pan, this.ctx.currentTime, 0.01);
+  }
+
+  /**
+   * Re-plan one track's envelopes mid-playback, after a point is added or
+   * dragged. Only the parameters are rescheduled; the source keeps
+   * playing, so editing a line while listening does not restart the take.
+   */
+  setAutomation(id: string, auto: Automation, pan: number) {
+    const n = this.nodes.get(id);
+    if (!n || !this.ctx) return;
+    const now = this.ctx.currentTime;
+    const local = now - n.origin;
+    schedule(n.env.gain, auto.gain, n.origin, local, now, 0, dbToGain);
+    schedule(n.panner.pan, auto.pan, n.origin, local, now, pan);
+    n.panAuto = auto.pan.length > 0;
   }
 
   setMasterGain(db: number) {
@@ -265,11 +304,19 @@ export async function bounce(
   for (const { track, buffer } of processed) {
     const src = ctx.createBufferSource();
     src.buffer = buffer;
+    const e = ctx.createGain();
     const g = ctx.createGain();
-    g.gain.value = dbToGain(track.gainDb);
     const p = ctx.createStereoPanner();
-    p.pan.value = track.pan;
-    src.connect(g).connect(p).connect(master);
+
+    // The same envelopes the transport plays, on the same helper. Export
+    // and monitoring diverging is the classic way an editor loses a
+    // listener's trust, and the only defence is one code path.
+    const auto = track.automation ?? emptyAutomation();
+    schedule(e.gain, auto.gain, track.offset, 0, 0, 0, dbToGain);
+    g.gain.value = dbToGain(track.gainDb);
+    schedule(p.pan, auto.pan, track.offset, 0, 0, track.pan);
+
+    src.connect(e).connect(g).connect(p).connect(master);
     src.start(track.offset);
   }
 

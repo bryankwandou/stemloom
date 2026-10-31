@@ -9,6 +9,8 @@ import { ExportDialog } from "@/components/studio/ExportDialog";
 import { ProjectsDialog } from "@/components/studio/ProjectsDialog";
 import { RecordButton } from "@/components/studio/RecordButton";
 import { ShortcutsDialog } from "@/components/studio/ShortcutsDialog";
+import { AutomationOverlay } from "@/components/studio/AutomationOverlay";
+import type { Lane } from "@/lib/audio/automation";
 import { Engine, type Track } from "@/lib/audio/engine";
 import * as ed from "@/lib/audio/edits";
 import {
@@ -22,6 +24,7 @@ import {
   removeTrack,
   replaceAudio,
   set,
+  setEnvelope,
   undo,
   useProject,
   type BandSelection,
@@ -201,6 +204,7 @@ export default function Studio() {
   const scrollSec = useProject((s) => s.scrollSec);
   const view = useProject((s) => s.view);
   const band = useProject((s) => s.band);
+  const automationLane = useProject((s) => s.automationLane);
   const playhead = useProject((s) => s.playhead);
   const playing = useProject((s) => s.playing);
   const masterChain = useProject((s) => s.masterChain);
@@ -587,6 +591,35 @@ export default function Studio() {
         </ToolButton>
 
         <div className="ml-auto flex items-center gap-1">
+          {/* Envelope editing. While a lane is chosen the pointer draws
+              that line instead of selecting audio, the way a tool switch
+              works in any larger editor. */}
+          <div className="mr-2 flex items-center gap-1">
+            <span className="text-[9.5px] uppercase tracking-wider text-ink-faint">Envelope</span>
+            <div className="flex rounded-[5px] border border-line p-[2px]">
+              {([null, "gain", "pan"] as const).map((l) => (
+                <button
+                  key={l ?? "off"}
+                  onClick={() => set({ automationLane: l })}
+                  aria-pressed={automationLane === l}
+                  title={
+                    l === null
+                      ? "Pointer selects audio"
+                      : l === "gain"
+                        ? "Draw volume over time. Click to add, drag to move, double-click to remove"
+                        : "Draw pan over time. Click to add, drag to move, double-click to remove"
+                  }
+                  className="rounded-[3px] px-2 py-[3px] text-[10.5px] transition-colors"
+                  style={{
+                    background: automationLane === l ? "var(--color-signal)" : "transparent",
+                    color: automationLane === l ? "#000" : "var(--color-ink-faint)",
+                  }}
+                >
+                  {l === null ? "Off" : l === "gain" ? "Volume" : "Pan"}
+                </button>
+              ))}
+            </div>
+          </div>
           {/* Amplitude or frequency. Two ways of looking at the same
               samples, and each hides what the other shows. */}
           <div className="mr-2 flex rounded-[5px] border border-line p-[2px]">
@@ -659,6 +692,7 @@ export default function Studio() {
                   peaks={peaks[t.id]}
                   isActive={t.id === activeId}
                   view={view}
+                  automationLane={automationLane}
                   band={band}
                   onBand={(b) => set({ band: b })}
                   scrollSec={scrollSec}
@@ -829,6 +863,7 @@ function TrackLane({
   peaks,
   isActive,
   view,
+  automationLane,
   scrollSec,
   spp,
   playhead,
@@ -843,6 +878,7 @@ function TrackLane({
   peaks: import("@/lib/audio/peaks").PeakSet | undefined;
   isActive: boolean;
   view: LaneView;
+  automationLane: Lane | null;
   scrollSec: number;
   spp: number;
   playhead: number;
@@ -946,7 +982,7 @@ function TrackLane({
       </div>
 
       {/* Waveform */}
-      <div className="min-w-0 flex-1">
+      <div className="relative min-w-0 flex-1">
         {peaks && (
           <Waveform
             peaks={peaks}
@@ -965,6 +1001,35 @@ function TrackLane({
             onScrub={onScrub}
           />
         )}
+        {/* Each lane shows the envelope it has; the chosen one is also
+            editable. Volume is drawn when nothing is chosen, so a track
+            with automation on it never looks like one without. */}
+        {peaks &&
+          (["gain", "pan"] as const)
+            .filter((l) => l === automationLane || (automationLane === null && track.automation?.[l]?.length))
+            .map((l) => (
+              <AutomationOverlay
+                key={l}
+                lane={l}
+                points={track.automation?.[l] ?? []}
+                fallback={l === "gain" ? 0 : track.pan}
+                editing={automationLane === l}
+                color={l === "gain" ? track.color : "#7aa2f7"}
+                height={LANE_H}
+                scrollSec={scrollSec}
+                secPerPx={spp / peaks.sampleRate}
+                offset={track.offset}
+                duration={track.buffer.duration}
+                onChange={(pts, final) => {
+                  setEnvelope(track.id, l, pts, final);
+                  engine.setAutomation(
+                    track.id,
+                    { ...(track.automation ?? { gain: [], pan: [] }), [l]: pts },
+                    track.pan,
+                  );
+                }}
+              />
+            ))}
       </div>
     </div>
   );

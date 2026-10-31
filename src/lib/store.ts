@@ -15,6 +15,7 @@
 
 import { useSyncExternalStore } from "react";
 import type { Track } from "./audio/engine";
+import { emptyAutomation, type Lane } from "./audio/automation";
 import type { EffectInstance } from "./audio/effects";
 import { computePeaks, type PeakSet } from "./audio/peaks";
 
@@ -45,6 +46,8 @@ export type ProjectState = {
   /** Amplitude envelope, or the frequency picture over time. */
   view: LaneView;
   band: BandSelection;
+  /** Which envelope the pointer edits, or null to edit audio as usual. */
+  automationLane: Lane | null;
 
   playhead: number;
   playing: boolean;
@@ -72,6 +75,7 @@ const initial: ProjectState = {
   scrollSec: 0,
   view: "wave",
   band: null,
+  automationLane: null,
   playhead: 0,
   playing: false,
   clipboard: null,
@@ -105,9 +109,23 @@ export function set(patch: Partial<ProjectState>) {
   emit();
 }
 
+/**
+ * State as it stood when a drag began. A drag previews through `preview`
+ * many times a second; the undo point has to be where it started, not the
+ * frame before it ended.
+ */
+let gestureBase: ProjectState | null = null;
+
+/** A live, unrecorded change that the next `commit` will fold into one step. */
+export function preview(patch: Partial<ProjectState>) {
+  if (!gestureBase) gestureBase = state;
+  set(patch);
+}
+
 /** Update and record an undo point. Use for anything that changes audio. */
 export function commit(patch: Partial<ProjectState>, label: string) {
-  undoStack.push(state);
+  undoStack.push(gestureBase ?? state);
+  gestureBase = null;
   if (undoStack.length > MAX_HISTORY) undoStack.shift();
   redoStack.length = 0;
   state = { ...state, ...patch, status: label };
@@ -160,6 +178,7 @@ export function addTrack(name: string, buffer: AudioBuffer) {
     muted: false,
     soloed: false,
     effects: [],
+    automation: emptyAutomation(),
     color: TRACK_COLORS[(trackCounter - 1) % TRACK_COLORS.length],
   };
 
@@ -332,4 +351,33 @@ export function resetProject() {
   trackCounter = 0;
   state = initial;
   emit();
+}
+
+/**
+ * Replace one envelope on one track. While a drag is live (`final` false)
+ * this previews without history; the release commits a single undo step
+ * covering the whole gesture.
+ */
+export function setEnvelope(
+  id: string,
+  lane: Lane,
+  points: { t: number; v: number }[],
+  final: boolean,
+) {
+  const tracks = state.tracks.map((t) =>
+    t.id === id
+      ? {
+          ...t,
+          automation: { ...(t.automation ?? emptyAutomation()), [lane]: points },
+        }
+      : t,
+  );
+  if (!final) return preview({ tracks });
+  const name = lane === "gain" ? "Volume" : "Pan";
+  commit(
+    { tracks },
+    points.length
+      ? `${name} envelope, ${points.length} point${points.length === 1 ? "" : "s"}`
+      : `${name} envelope cleared`,
+  );
 }

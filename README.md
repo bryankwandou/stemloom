@@ -34,6 +34,10 @@ Stemloom aims at the gap: multitrack, offline, and unrestricted.
 - Spectral repair: drag a box around a noise on the spectrogram and either
   rebuild that patch from the sound either side of it or pull it down 40 dB,
   leaving everything above and below the box alone
+- Volume and pan envelopes drawn over each track: click to add a point,
+  drag to move it, double-click to remove it. The volume line sits on top of
+  the fader rather than replacing it, and export plays the same line the
+  transport does
 - WAV export at 16, 24, or 32-bit float, at 44.1k / 48k / 96k, mono or stereo
 - AAC export through WebCodecs with hand-written ADTS framing
 - Triangular dither on fixed-point export
@@ -71,6 +75,7 @@ Everything in `src/lib/audio` is plain TypeScript with no audio dependencies.
 | `recorder.ts` | Input capture through an AudioWorklet |
 | `spectrogram.ts` | Radix-2 FFT, short-time transform, and the display ramp |
 | `spectral.ts` | The same transform run backwards, for repairing a band over a range |
+| `automation.ts` | Volume and pan envelopes, and the one scheduler both playback and export use |
 
 A few decisions worth calling out:
 
@@ -124,8 +129,8 @@ Then open `http://localhost:3000`.
 ## Verification
 
 A green TypeScript build says nothing about whether a microphone opens, an
-encoder emits a valid bitstream, or a canvas has any pixels on it. Two
-suites cover that, and both are meant to be run by hand.
+encoder emits a valid bitstream, or a canvas has any pixels on it. Four
+suites cover that, and all of them are meant to be run by hand.
 
 `scripts/browser-check.mjs` drives the real page in real Chromium and reads
 the bytes that come out: the exported WAV is parsed back and checked for a
@@ -170,6 +175,18 @@ selected time are byte for byte unchanged.
 npx tsc src/lib/audio/spectral.ts src/lib/audio/spectrogram.ts   --target es2020 --module es2020 --skipLibCheck --outDir .tmp-check
 node scripts/fix-esm.mjs .tmp-check
 node scripts/spectral-check.mjs
+```
+
+`scripts/automation-check.mjs` drives the envelope scheduler against a fake
+AudioParam that records every call, because Node has no audio clock. It
+checks that playback resumed half way down a fade starts at the level the
+line reads there rather than at the top of it, that points already behind
+the playhead are skipped, and that ramps carry linear amplitude, since a
+straight line in decibels sags audibly in the middle.
+
+```bash
+npx tsc src/lib/audio/automation.ts --target es2020 --module es2020 --skipLibCheck --outDir .tmp-check
+node scripts/automation-check.mjs
 ```
 
 ## On the subject of other people's software
