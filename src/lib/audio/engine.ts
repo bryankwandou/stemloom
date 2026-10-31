@@ -64,6 +64,8 @@ export class Engine {
   private meterBuf = new Float32Array(2048);
   /** LFOs started inside live effects, which have to be stopped by hand. */
   private liveSources: AudioScheduledSourceNode[] = [];
+  /** Bumped by every play and stop, so a stale play knows to give up. */
+  private gen = 0;
   /**
    * Tracks whose chain changes their length are rendered before playing,
    * exactly as export renders them. Keyed on the buffer and the chain, so
@@ -105,7 +107,14 @@ export class Engine {
     masterChain: EffectInstance[] = [],
   ) {
     await this.resume();
-    this.stop(false);
+    // When this is a rebuild during playback, the old graph keeps sounding
+    // through the awaits below and is only swapped out once the new one is
+    // ready. Stopping first left dead air for as long as the effects took
+    // to load, which on a slow machine was long enough to hear.
+    const rebuilding = this.playing;
+    const askedAt = this.context().currentTime;
+    // A pause, or a newer play, while this one is still preparing wins.
+    const gen = ++this.gen;
 
     // Everything slow happens before the clock is read. Rendering a
     // stretched track can take a moment, and any await between reading
@@ -127,7 +136,12 @@ export class Engine {
       }
     }
 
+    if (gen !== this.gen) return;
+    this.stop(false);
     const ctx = this.context();
+    // The playhead kept moving while the new graph was prepared, so pick up
+    // where it is now rather than where it was when asked.
+    if (rebuilding) from += ctx.currentTime - askedAt;
     const anySolo = tracks.some((t) => t.soloed);
 
     /** Run a chain live, returning its output, or the input if it is empty. */
@@ -210,6 +224,7 @@ export class Engine {
   }
 
   stop(resetPosition = true) {
+    this.gen++;
     for (const s of this.liveSources) {
       try {
         s.stop();

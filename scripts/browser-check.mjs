@@ -134,6 +134,10 @@ async function main() {
     if (m.type() === "error") errors.push(m.text().slice(0, 200));
   });
   page.on("pageerror", (e) => errors.push("pageerror: " + String(e).slice(0, 200)));
+  // Failed requests explain most intermittent failures, so keep them.
+  ctx.on("requestfailed", (r) =>
+    errors.push(`requestfailed: ${r.url().slice(-80)} ${r.failure()?.errorText ?? ""}`),
+  );
 
   // ---- Load ----
   await check("studio page loads", async () => {
@@ -232,6 +236,16 @@ async function main() {
     await page.waitForTimeout(2500);
     const text = await page.innerText("body");
     assert(/Healed/.test(text), "the status line never reported a repair");
+
+    // The edit hands the lane a new buffer. The picture has to follow it
+    // rather than go blank or keep showing the audio from before.
+    let s = null;
+    const until = Date.now() + 10000;
+    do {
+      await page.waitForTimeout(400);
+      s = await canvasStats();
+    } while (s && s.distinct <= 6 && Date.now() < until);
+    assert(s && s.distinct > 6, `spectrogram blank after the edit (${s?.distinct} colours)`);
 
     // Undo has to put the samples back, or the operation is not safe to
     // offer at all.
@@ -389,16 +403,33 @@ async function main() {
     // 40 Hz and 400 Hz. Nothing else in the chain could put energy at 40.
     await page.click("button:has-text('Add')");
     await page.click("button:has-text('Ring Modulator')");
-    await page.waitForTimeout(700);
-    const during = await lowShare();
+    // Polled rather than a fixed wait: on a loaded machine the rebuild
+    // takes longer, and what is under test is that it happens, not how
+    // quick this particular machine is.
+    let during = null;
+    for (let k = 0; k < 10 && !(during > before * 10); k++) {
+      await page.waitForTimeout(300);
+      during = await lowShare();
+    }
 
     await page.click("button[aria-label='Remove Ring Modulator']");
-    await page.waitForTimeout(700);
-    const after = await lowShare();
+    let after = null;
+    for (let k = 0; k < 10 && !(after !== null && after < during / 10); k++) {
+      await page.waitForTimeout(300);
+      after = await lowShare();
+    }
     await page.keyboard.press("Space");
 
     const db = (x) => (10 * Math.log10(x)).toFixed(1);
-    assert(during > before * 10, `the low band moved only from ${db(before)} to ${db(during)} dB`);
+    if (!(during > before * 10)) {
+      const clock = await page.evaluate(() => {
+        const el = [...document.querySelectorAll("span,div")].find((n) =>
+          /^\d{2}:\d{2}[.:]\d+/.test(n.textContent?.trim() ?? ""),
+        );
+        return `${el?.textContent?.trim().slice(0, 20)}; ctx ${window.__tap?.context.state}`;
+      });
+      throw new Error(`the low band moved only from ${db(before)} to ${db(during)} dB (${clock})`);
+    }
     assert(after < during / 10, `removing the effect left the low band at ${db(after)} dB`);
     return `energy below 60 Hz ${db(before)} → ${db(during)} → ${db(after)} dB`;
   });
@@ -553,7 +584,36 @@ async function main() {
       { timeout: 10000, polling: 250 },
     );
     await ctx.setOffline(true);
-    const res = await page.goto(`${BASE}/studio`, { waitUntil: "domcontentloaded" });
+    // Through the worker from inside the page first. If this answers but
+    // the navigation below does not, the fault is in how navigations reach
+    // the worker, not in what it cached.
+    const viaFetch = await page.evaluate(async () => {
+      try {
+        const r = await fetch("/studio");
+        return `fetch ${r.status}`;
+      } catch (e) {
+        return `fetch failed: ${e}`;
+      }
+    });
+    let res;
+    try {
+      res = await page.goto(`${BASE}/studio`, { waitUntil: "domcontentloaded" });
+    } catch (e) {
+      await ctx.setOffline(false);
+      const first = String(e.message).split(String.fromCharCode(10))[0].trim();
+      const state = await page
+        .evaluate(async () => {
+          const keys = await caches.keys();
+          const urls = [];
+          for (const k of keys) {
+            for (const r of await (await caches.open(k)).keys()) urls.push(new URL(r.url).pathname);
+          }
+          const ctl = navigator.serviceWorker.controller?.state ?? "none";
+          return `caches ${keys.join(",")}; ${urls.length} urls, studio ${urls.includes("/studio")}; controller ${ctl}`;
+        })
+        .catch((x) => `state unreadable: ${x}`);
+      throw new Error(`${first} (${viaFetch}; ${state})`);
+    }
     await ctx.setOffline(false);
     assert(res && res.status() < 400, `offline load returned ${res && res.status()}`);
     const body = await page.innerText("body");

@@ -87,7 +87,17 @@ export function Waveform({
   } | null>(null);
 
   const workerRef = useRef<Worker | null>(null);
-  const jobRef = useRef({ id: 0, pending: "" });
+  /**
+   * The request in flight. The audio it was made for travels with it:
+   * the worker is created once, so its reply handler cannot read `buffer`
+   * from its own closure without seeing the audio as it was before every
+   * edit since.
+   */
+  const jobRef = useRef<{ id: number; pending: string; buf: AudioBuffer | null }>({
+    id: 0,
+    pending: "",
+    buf: null,
+  });
 
   // A landed tile has to repaint the lane, but it lives in a ref rather
   // than state — the pixels themselves never need to drive React.
@@ -120,7 +130,7 @@ export function Waveform({
 
       const [, start, end] = jobRef.current.pending.split("|");
       tileRef.current = {
-        buf: buffer,
+        buf: jobRef.current.buf ?? buffer,
         startSample: Number(start),
         endSample: Number(end),
         canvas: off,
@@ -212,9 +222,13 @@ export function Waveform({
         tile.endSample !== endSample;
 
       const worker = workerRef.current;
-      if (stale && worker && jobRef.current.pending.split("|").slice(1).join("|") !== want) {
+      const asked =
+        jobRef.current.buf === buffer &&
+        jobRef.current.pending.split("|").slice(1).join("|") === want;
+      if (stale && worker && !asked) {
         const id = ++jobRef.current.id;
         jobRef.current.pending = `${id}|${want}`;
+        jobRef.current.buf = buffer;
 
         // Copy out only the window, with the analysis window's overhang on
         // each side. Reads past either end of the track stay zero, which
@@ -253,7 +267,10 @@ export function Waveform({
       g.fillStyle = "#08090a";
       g.fillRect(0, 0, w, h);
 
-      if (tile && tile.buf === buffer) {
+      // An edit swaps the buffer; the previous picture stays up until its
+      // replacement lands, as it does while scrolling, instead of the lane
+      // going black for the length of an analysis.
+      if (tile) {
         // Place the tile by the window it was computed for, not by the
         // window on screen now. If the user has scrolled since, it lands
         // off to one side, which is correct and readable.
