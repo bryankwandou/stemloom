@@ -14,7 +14,7 @@
 
 // Bumped when a cached file changes shape, such as the recorder worklet
 // learning to acknowledge a stop.
-const CACHE = "stemloom-v2";
+const CACHE = "stemloom-v3";
 
 // The shell we want available before the user ever goes offline.
 const PRECACHE = ["/", "/studio", "/manifest.webmanifest", "/icon.svg"];
@@ -77,7 +77,31 @@ self.addEventListener("fetch", (event) => {
         })
         .catch(() => hit);
 
+      if (hit && (req.destination === "worker" || req.destination === "sharedworker")) {
+        return detach(hit);
+      }
       return hit || network;
     }),
   );
 });
+
+/**
+ * A copy of a cached response with no URL of its own.
+ *
+ * A worker takes its location from the response that served its script.
+ * The bundler starts every worker from the same bootstrap file and passes
+ * the chunks to load in the URL's fragment, and the Cache API stores URLs
+ * without fragments — so a worker served straight from the cache wakes up
+ * with no idea what to load and never answers. A response with no URL
+ * leaves the worker the one it was created with, fragment and all.
+ */
+function detach(res) {
+  return res.blob().then(
+    (body) =>
+      new Response(body, {
+        status: res.status,
+        statusText: res.statusText,
+        headers: res.headers,
+      }),
+  );
+}

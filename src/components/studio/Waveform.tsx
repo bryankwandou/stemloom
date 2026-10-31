@@ -115,6 +115,7 @@ export function Waveform({
 
     worker.onmessage = (e: MessageEvent<SpectrogramReply>) => {
       const reply = e.data;
+      if (reply?.kind !== "spectrogram") return;
       // Anything but the newest request is a window the user has already
       // scrolled away from.
       if (String(reply.id) !== jobRef.current.pending.split("|")[0]) return;
@@ -247,6 +248,7 @@ export function Waveform({
         }
 
         const req: SpectrogramRequest = {
+          kind: "spectrogram",
           id,
           channels: slices,
           sliceOffset: FFT_PAD,

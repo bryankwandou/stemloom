@@ -22,6 +22,7 @@ import {
   projectDuration,
   redo,
   removeTrack,
+  moveTrack,
   replaceAudio,
   set,
   setEnvelope,
@@ -31,6 +32,8 @@ import {
   type LaneView,
 } from "@/lib/store";
 import { repairChannel, type RepairMode } from "@/lib/audio/spectral";
+import { learnNoise, type NoiseProfile } from "@/lib/audio/denoise";
+import type { DenoiseReply, DenoiseRequest } from "@/lib/audio/denoise.worker";
 
 const LANE_H = 96;
 
@@ -205,6 +208,7 @@ export default function Studio() {
   const view = useProject((s) => s.view);
   const band = useProject((s) => s.band);
   const automationLane = useProject((s) => s.automationLane);
+  const moveTool = useProject((s) => s.moveTool);
   const playhead = useProject((s) => s.playhead);
   const playing = useProject((s) => s.playing);
   const masterChain = useProject((s) => s.masterChain);
@@ -363,6 +367,87 @@ export default function Studio() {
         ? `Healed ${hz(band.loHz)}–${hz(band.hiHz)}`
         : `Cut ${hz(band.loHz)}–${hz(band.hiHz)} by 40 dB`,
     );
+  };
+
+  /* ---- Noise reduction ------------------------------------------- */
+
+  const [noiseProfile, setNoiseProfile] = useState<NoiseProfile | null>(null);
+  const [nrDb, setNrDb] = useState(12);
+  const [nrBusy, setNrBusy] = useState(false);
+
+  const learn = () => {
+    if (!active || !selection || selection.trackId !== active.id) return;
+    const src = active.buffer;
+    try {
+      const chans = Array.from({ length: src.numberOfChannels }, (_, c) => src.getChannelData(c));
+      const prof = learnNoise(chans, selection.start, selection.end, src.sampleRate);
+      setNoiseProfile(prof);
+      const secs = (selection.end - selection.start) / src.sampleRate;
+      set({ status: `Learned noise from ${secs.toFixed(2)} s` });
+    } catch (e) {
+      set({ status: e instanceof Error ? e.message : "Could not learn from that selection." });
+    }
+  };
+
+  const reduce = () => {
+    if (!active || !noiseProfile || nrBusy) return;
+    const src = active.buffer;
+    if (src.sampleRate !== noiseProfile.sampleRate) {
+      set({ status: "That noise was learned at a different sample rate. Learn it again here." });
+      return;
+    }
+    const id = active.id;
+    setNrBusy(true);
+    set({ status: "Reducing noise" });
+
+    const worker = new Worker(
+      new URL("../../lib/audio/denoise.worker.ts", import.meta.url),
+      { type: "module" },
+    );
+    const channels = Array.from({ length: src.numberOfChannels }, (_, c) =>
+      src.getChannelData(c).slice().buffer,
+    );
+    const noise = noiseProfile.mags.map((m) => m.slice().buffer);
+    worker.onmessage = (e: MessageEvent<DenoiseReply>) => {
+      worker.terminate();
+      setNrBusy(false);
+      const reply = e.data;
+      // Another worker's module can share this worker; its replies are
+      // not for us.
+      if (reply?.kind !== "denoise") return;
+      if ("error" in reply) {
+        set({ status: `Noise reduction failed: ${reply.error}` });
+        return;
+      }
+      // Anything else that arrives must not leave the button stuck on
+      // "Reducing" with an exception nobody sees.
+      if (!reply || !Array.isArray(reply.channels)) {
+        const shape = reply && typeof reply === "object" ? Object.keys(reply).join(",") : typeof reply;
+        set({ status: `Noise reduction failed: unexpected reply (${shape})` });
+        return;
+      }
+      // An edit made while this ran would be silently overwritten.
+      const now = getState().tracks.find((t) => t.id === id);
+      if (!now || now.buffer !== src) {
+        set({ status: "The track changed while reducing. Run it again." });
+        return;
+      }
+      const out = ed.makeBuffer(src.numberOfChannels, src.length, src.sampleRate);
+      reply.channels.forEach((raw, c) => out.copyToChannel(new Float32Array(raw), c));
+      replaceAudio(id, out, `Reduced noise by ${nrDb} dB`);
+    };
+    worker.onerror = () => {
+      worker.terminate();
+      setNrBusy(false);
+      set({ status: "Noise reduction failed to start." });
+    };
+    const req: DenoiseRequest = {
+      kind: "denoise",
+      channels,
+      noise,
+      opts: { reductionDb: nrDb, sensitivityDb: 6 },
+    };
+    worker.postMessage(req, [...channels, ...noise]);
   };
 
   const withActive = (
@@ -530,6 +615,41 @@ export default function Studio() {
           Silence
         </ToolButton>
 
+        <div className="mx-1.5 h-4 w-px bg-line" />
+
+        {/* Learn from a stretch of noise on its own, then take that noise
+            out of the whole track. */}
+        <ToolButton
+          onClick={learn}
+          disabled={!hasSel}
+          title="Select a stretch where only the noise plays, then learn it"
+        >
+          Learn Noise
+        </ToolButton>
+        <ToolButton
+          onClick={reduce}
+          disabled={!active || !noiseProfile || nrBusy}
+          title={
+            noiseProfile
+              ? "Reduce the learned noise across the whole track"
+              : "Learn the noise first"
+          }
+        >
+          {nrBusy ? "Reducing" : "Reduce Noise"}
+        </ToolButton>
+        <select
+          value={nrDb}
+          onChange={(e) => setNrDb(Number(e.target.value))}
+          aria-label="Noise reduction amount"
+          className="tnum ml-0.5 shrink-0 rounded-[4px] border border-line bg-canvas px-1 py-[2px] text-[10.5px] text-ink-dim"
+        >
+          {[6, 12, 18, 24].map((v) => (
+            <option key={v} value={v}>
+              {v} dB
+            </option>
+          ))}
+        </select>
+
         {/* Spectral repair only makes sense against a picture of the
             frequencies, so the controls live with that view rather than
             sitting greyed out in the waveform one. */}
@@ -613,33 +733,48 @@ export default function Studio() {
         </ToolButton>
 
         <div className="ml-auto flex items-center gap-1">
-          {/* Envelope editing. While a lane is chosen the pointer draws
-              that line instead of selecting audio, the way a tool switch
-              works in any larger editor. */}
+          {/* What the pointer does in a lane: select audio, slide the
+              track, or draw one of its envelopes. One switch rather than
+              several toggles, so two of them can never be on at once. */}
           <div className="mr-2 flex items-center gap-1">
-            <span className="text-[9.5px] uppercase tracking-wider text-ink-faint">Envelope</span>
+            <span className="text-[9.5px] uppercase tracking-wider text-ink-faint">Tool</span>
             <div className="flex rounded-[5px] border border-line p-[2px]">
-              {([null, "gain", "pan"] as const).map((l) => (
-                <button
-                  key={l ?? "off"}
-                  onClick={() => set({ automationLane: l })}
-                  aria-pressed={automationLane === l}
-                  title={
-                    l === null
-                      ? "Pointer selects audio"
-                      : l === "gain"
-                        ? "Draw volume over time. Click to add, drag to move, double-click to remove"
-                        : "Draw pan over time. Click to add, drag to move, double-click to remove"
-                  }
-                  className="rounded-[3px] px-2 py-[3px] text-[10.5px] transition-colors"
-                  style={{
-                    background: automationLane === l ? "var(--color-signal)" : "transparent",
-                    color: automationLane === l ? "#000" : "var(--color-ink-faint)",
-                  }}
-                >
-                  {l === null ? "Off" : l === "gain" ? "Volume" : "Pan"}
-                </button>
-              ))}
+              {(["select", "move", "gain", "pan"] as const).map((tool) => {
+                const on =
+                  tool === "move"
+                    ? moveTool
+                    : tool === "select"
+                      ? !moveTool && automationLane === null
+                      : !moveTool && automationLane === tool;
+                return (
+                  <button
+                    key={tool}
+                    onClick={() =>
+                      set({
+                        moveTool: tool === "move",
+                        automationLane: tool === "gain" || tool === "pan" ? tool : null,
+                      })
+                    }
+                    aria-pressed={on}
+                    title={
+                      tool === "select"
+                        ? "Pointer selects audio"
+                        : tool === "move"
+                          ? "Drag a track left or right along the timeline"
+                          : tool === "gain"
+                            ? "Draw volume over time. Click to add, drag to move, double-click to remove"
+                            : "Draw pan over time. Click to add, drag to move, double-click to remove"
+                    }
+                    className="rounded-[3px] px-2 py-[3px] text-[10.5px] transition-colors"
+                    style={{
+                      background: on ? "var(--color-signal)" : "transparent",
+                      color: on ? "#000" : "var(--color-ink-faint)",
+                    }}
+                  >
+                    {tool === "select" ? "Select" : tool === "move" ? "Move" : tool === "gain" ? "Volume" : "Pan"}
+                  </button>
+                );
+              })}
             </div>
           </div>
           {/* Amplitude or frequency. Two ways of looking at the same
@@ -715,6 +850,7 @@ export default function Studio() {
                   isActive={t.id === activeId}
                   view={view}
                   automationLane={automationLane}
+                  moveTool={moveTool}
                   band={band}
                   onBand={(b) => set({ band: b })}
                   scrollSec={scrollSec}
@@ -880,12 +1016,57 @@ export default function Studio() {
 
 /* ------------------------------------------------------------------ */
 
+/**
+ * A transparent layer over a lane that turns a horizontal drag into a new
+ * start time for the track. Snaps to the timeline's zero and to whole
+ * tenths of a second when Shift is held, which is enough to line two
+ * takes up by ear without a grid.
+ */
+function MoveHandle({
+  track,
+  secPerPx,
+  onMove,
+}: {
+  track: Track;
+  secPerPx: number;
+  onMove: (offset: number, final: boolean) => void;
+}) {
+  const drag = useRef<{ x: number; from: number; at: number } | null>(null);
+  return (
+    <div
+      data-move-lane={track.id}
+      className="absolute inset-0"
+      style={{ cursor: drag.current ? "grabbing" : "grab", touchAction: "none" }}
+      onPointerDown={(e) => {
+        e.stopPropagation();
+        e.currentTarget.setPointerCapture(e.pointerId);
+        drag.current = { x: e.clientX, from: track.offset, at: track.offset };
+      }}
+      onPointerMove={(e) => {
+        const d = drag.current;
+        if (!d) return;
+        let at = Math.max(0, d.from + (e.clientX - d.x) * secPerPx);
+        if (e.shiftKey) at = Math.round(at * 10) / 10;
+        if (at < secPerPx * 6) at = 0;
+        d.at = at;
+        onMove(at, false);
+      }}
+      onPointerUp={() => {
+        const d = drag.current;
+        drag.current = null;
+        if (d && d.at !== d.from) onMove(d.at, true);
+      }}
+    />
+  );
+}
+
 function TrackLane({
   track,
   peaks,
   isActive,
   view,
   automationLane,
+  moveTool,
   scrollSec,
   spp,
   playhead,
@@ -901,6 +1082,7 @@ function TrackLane({
   isActive: boolean;
   view: LaneView;
   automationLane: Lane | null;
+  moveTool: boolean;
   scrollSec: number;
   spp: number;
   playhead: number;
@@ -1021,6 +1203,19 @@ function TrackLane({
             onSelect={onSelect}
             onBand={onBand}
             onScrub={onScrub}
+          />
+        )}
+        {/* The move tool covers the lane, so a drag slides the track
+            instead of selecting inside it. */}
+        {peaks && moveTool && (
+          <MoveHandle
+            track={track}
+            secPerPx={spp / peaks.sampleRate}
+            onMove={(at, final) => {
+              moveTrack(track.id, at, final);
+              // Playing on is fine; the next play picks the new place up.
+              // Restarting mid-drag would stutter on every pixel.
+            }}
           />
         )}
         {/* Each lane shows the envelope it has; the chosen one is also

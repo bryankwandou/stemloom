@@ -136,7 +136,13 @@ async function main() {
   page.on("console", (m) => {
     if (m.type() === "error") errors.push(m.text().slice(0, 200));
   });
-  page.on("pageerror", (e) => errors.push("pageerror: " + String(e).slice(0, 200)));
+  page.on("pageerror", (e) =>
+    errors.push("pageerror: " + String(e.stack ?? e).split(String.fromCharCode(10)).slice(0, 4).join(" <- ").slice(0, 400)),
+  );
+  page.on("worker", (w) => {
+    w.on("console", (m) => m.type() === "error" && errors.push(`worker: ${m.text().slice(0, 200)}`));
+  });
+  ctx.on("weberror", (e) => errors.push(`weberror: ${String(e.error()?.message ?? e.error()).slice(0, 200)}`));
   // Failed requests explain most intermittent failures, so keep them.
   ctx.on("requestfailed", (r) =>
     errors.push(`requestfailed: ${r.url().slice(-80)} ${r.failure()?.errorText ?? ""}`),
@@ -307,6 +313,83 @@ async function main() {
     return "history responded";
   });
 
+  // ---- Noise reduction ----
+  await check("noise is learned from a selection and reduced across the track", async () => {
+    const box = await page.evaluate(() => {
+      const all = [...document.querySelectorAll("canvas")];
+      const c = all.sort((a, b) => b.width * b.height - a.width * a.height)[0];
+      const r = c.getBoundingClientRect();
+      return { x: r.x, y: r.y, w: r.width, h: r.height };
+    });
+    await page.mouse.move(box.x + box.w * 0.1, box.y + box.h * 0.5);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.w * 0.3, box.y + box.h * 0.5, { steps: 10 });
+    await page.mouse.up();
+    await page.click("button:has-text('Learn Noise')");
+    await page.waitForTimeout(300);
+    let text = await page.innerText("body");
+    assert(/Learned noise from [\d.]+ s/.test(text), "no confirmation that noise was learned");
+
+    const reduceBtn = page.locator("button:has-text('Reduce Noise')").first();
+    assert(await reduceBtn.isEnabled(), "Reduce Noise is disabled after learning");
+    await reduceBtn.click();
+    // Runs in a worker, so wait for the status rather than a fixed time.
+    try {
+      await page.waitForFunction(() => /Reduced noise by \d+ dB|failed|changed while/.test(document.body.innerText), null, {
+        timeout: 30000,
+      });
+    } catch {
+      const body = await page.innerText("body");
+      const lines = body.split(String.fromCharCode(10)).filter((l) => /nois|Reduc|Learn|Undo|Healed|Cut/i.test(l));
+      throw new Error(`no result after 30 s; status lines: ${lines.slice(0, 6).join(" | ")}`);
+    }
+    text = await page.innerText("body");
+    assert(/Reduced noise by 12 dB/.test(text), `reduction did not finish: ${text.match(/Noise reduction failed.*/)?.[0] ?? ""}`);
+    await page.keyboard.press("Control+z");
+    await page.waitForTimeout(300);
+    return "learned, reduced in a worker, and undone";
+  });
+
+  // ---- Moving a track ----
+  await check("the move tool slides a track along the timeline, undoably", async () => {
+    await page.click("button[aria-pressed]:has-text('Move')");
+    const lane = page.locator("[data-move-lane]").first();
+    await lane.waitFor({ timeout: 3000 });
+    const r = await lane.boundingBox();
+    // Bright pixels in the first sliver of the lane, where the track's
+    // opening currently sits.
+    const headLit = () =>
+      page.evaluate(() => {
+        const all = [...document.querySelectorAll("canvas")];
+        const c = all.sort((a, b) => b.width * b.height - a.width * a.height)[0];
+        const d = c.getContext("2d").getImageData(0, 0, Math.floor(c.width * 0.05), c.height).data;
+        let lit = 0;
+        for (let i = 0; i < d.length; i += 4) if (d[i] + d[i + 1] + d[i + 2] > 200) lit++;
+        return lit;
+      });
+    const litBefore = await headLit();
+    await page.mouse.move(r.x + r.width * 0.2, r.y + r.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(r.x + r.width * 0.2 + 160, r.y + r.height / 2, { steps: 10 });
+    await page.mouse.up();
+    await page.waitForTimeout(300);
+    const text = await page.innerText("body");
+    const m = text.match(/Moved .* to ([\d.]+) s/);
+    assert(m, "no move reported in the status line");
+    assert(Number(m[1]) > 0.1, `the track only moved to ${m[1]} s`);
+
+    // The waveform has to follow: the strip the track used to start in
+    // is now empty timeline.
+    const litAfter = await headLit();
+    assert(litAfter < litBefore / 4,
+      `the old start still holds ${litAfter} bright pixels (was ${litBefore})`);
+
+    await page.keyboard.press("Control+z");
+    await page.waitForTimeout(300);
+    await page.click("button[aria-pressed]:has-text('Select')");
+    return `moved to ${m[1]} s; old start went from ${litBefore} to ${litAfter} bright pixels; undone`;
+  });
+
   // ---- Automation ----
   await check("a volume envelope takes points, drags, and removes them", async () => {
     await page.click("button[aria-pressed]:has-text('Volume')");
@@ -346,7 +429,7 @@ async function main() {
   });
 
   await check("the envelope stays visible with editing switched off", async () => {
-    await page.click("button[aria-pressed]:has-text('Off')");
+    await page.click("button[aria-pressed]:has-text('Select')");
     await page.waitForTimeout(200);
     const shown = await page.locator("svg[data-automation-lane='gain']").count();
     assert(shown > 0, "the drawn line vanished when editing was turned off");
@@ -678,6 +761,35 @@ async function main() {
     const body = await page.innerText("body");
     assert(/Drop an audio file|Export/.test(body), "offline page did not render the editor");
     return "loaded from cache with the network off";
+  });
+
+  // A return visit: by now the service worker holds the worker bootstrap
+  // in its cache. Served from there naively, a worker lost the chunk list
+  // carried in its URL and never answered, so the spectrogram stayed black
+  // on every visit after the first.
+  await check("on a return visit, workers served from the cache still run", async () => {
+    await page.goto(`${BASE}/studio`, { waitUntil: "domcontentloaded" });
+    await page.click("text=Use a test signal");
+    await page.waitForSelector("canvas", { timeout: 15000 });
+    await page.click("button:has-text('Spectrum')");
+    let s = null;
+    const until = Date.now() + 10000;
+    do {
+      await page.waitForTimeout(500);
+      s = await canvasStats();
+    } while (s && s.distinct <= 6 && Date.now() < until);
+    assert(s && s.distinct > 6, `spectrogram blank on the return visit (${s?.distinct} colours)`);
+    const fromCache = await page.evaluate(async () => {
+      const keys = await caches.keys();
+      let workers = 0;
+      for (const k of keys) {
+        for (const r of await (await caches.open(k)).keys()) {
+          if (/turbopack-worker/.test(r.url)) workers++;
+        }
+      }
+      return workers;
+    });
+    return `${s.distinct} colours, with ${fromCache} worker script(s) in the offline cache`;
   });
 
   await browser.close();

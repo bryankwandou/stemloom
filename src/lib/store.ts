@@ -48,6 +48,8 @@ export type ProjectState = {
   band: BandSelection;
   /** Which envelope the pointer edits, or null to edit audio as usual. */
   automationLane: Lane | null;
+  /** When on, dragging a lane slides the whole track along the timeline. */
+  moveTool: boolean;
 
   playhead: number;
   playing: boolean;
@@ -76,6 +78,7 @@ const initial: ProjectState = {
   view: "wave",
   band: null,
   automationLane: null,
+  moveTool: false,
   playhead: 0,
   playing: false,
   clipboard: null,
@@ -380,4 +383,16 @@ export function setEnvelope(
       ? `${name} envelope, ${points.length} point${points.length === 1 ? "" : "s"}`
       : `${name} envelope cleared`,
   );
+}
+
+/**
+ * Slide a track along the timeline. Previewed while dragging, committed as
+ * one undo step on release, the same way envelope drags work.
+ */
+export function moveTrack(id: string, offset: number, final: boolean) {
+  const at = Math.max(0, offset);
+  const tracks = state.tracks.map((t) => (t.id === id ? { ...t, offset: at } : t));
+  if (!final) return preview({ tracks });
+  const name = state.tracks.find((t) => t.id === id)?.name ?? "track";
+  commit({ tracks }, `Moved ${name} to ${at.toFixed(3)} s`);
 }

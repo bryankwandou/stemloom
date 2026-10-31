@@ -41,7 +41,7 @@ export type Band = { loHz: number; hiHz: number };
  * twiddle factors with the signs flipped. The imaginary part comes back as
  * rounding noise and is dropped.
  */
-function inverse(
+export function inverse(
   re: Float32Array,
   im: Float32Array,
   p: Plan,

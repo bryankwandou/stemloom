@@ -15,6 +15,7 @@
 import { analyse, paint } from "./spectrogram";
 
 export type SpectrogramRequest = {
+  kind: "spectrogram";
   id: number;
   /** One slice per channel, already trimmed to the window plus padding. */
   channels: ArrayBuffer[];
@@ -27,14 +28,21 @@ export type SpectrogramRequest = {
 };
 
 export type SpectrogramReply = {
+  kind: "spectrogram";
   id: number;
   width: number;
   height: number;
   pixels: ArrayBuffer;
 };
 
-self.onmessage = (e: MessageEvent<SpectrogramRequest>) => {
+// A listener that answers only its own kind of request, rather than an
+// onmessage handler. The bundler can evaluate this module inside another
+// worker that shares its chunks; assigned to onmessage, it then replaced
+// that worker's handler and answered noise-reduction requests with
+// spectrogram tiles.
+self.addEventListener("message", (e: MessageEvent<SpectrogramRequest>) => {
   const req = e.data;
+  if (req?.kind !== "spectrogram") return;
   const { columns, bands, sampleRate } = req;
   const height = bands * req.channels.length;
   const rgba = new Uint8ClampedArray(columns * height * 4);
@@ -57,10 +65,11 @@ self.onmessage = (e: MessageEvent<SpectrogramRequest>) => {
   }
 
   const reply: SpectrogramReply = {
+    kind: "spectrogram",
     id: req.id,
     width: columns,
     height,
     pixels: rgba.buffer,
   };
   (self as unknown as Worker).postMessage(reply, [rgba.buffer]);
-};
+});

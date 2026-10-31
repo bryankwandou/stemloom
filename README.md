@@ -19,7 +19,11 @@ Stemloom aims at the gap: multitrack, offline, and unrestricted.
 
 ## What works today
 
-- Multitrack timeline with per-track gain, pan, mute, and solo
+- Multitrack timeline with per-track gain, pan, mute, and solo, and a move
+  tool that slides a track along the timeline (Shift snaps to tenths)
+- Noise reduction from a learned profile: select a stretch of noise alone,
+  learn it, then take it out of the whole track at 6 to 24 dB. Runs in a
+  worker, so a long track does not freeze the page
 - Sample-accurate range selection with zero-crossing snapping
 - Cut, copy, paste, crop, silence, repeat, and pad
 - Fades in four curves: linear, exponential, logarithmic, and smoothstep
@@ -80,6 +84,7 @@ Everything in `src/lib/audio` is plain TypeScript with no audio dependencies.
 | `recorder.ts` | Input capture through an AudioWorklet |
 | `spectrogram.ts` | Radix-2 FFT, short-time transform, and the display ramp |
 | `spectral.ts` | The same transform run backwards, for repairing a band over a range |
+| `denoise.ts` | Noise profile and reduction, with gains smoothed in decibels across time and frequency |
 | `ogg.ts` | Ogg pages, checksums, and the two Opus headers, written to RFC 3533 and RFC 7845 |
 | `automation.ts` | Volume and pan envelopes, and the one scheduler both playback and export use |
 
@@ -135,7 +140,7 @@ Then open `http://localhost:3000`.
 ## Verification
 
 A green TypeScript build says nothing about whether a microphone opens, an
-encoder emits a valid bitstream, or a canvas has any pixels on it. Five
+encoder emits a valid bitstream, or a canvas has any pixels on it. Six
 suites cover that, and all of them are meant to be run by hand.
 
 `scripts/browser-check.mjs` drives the real page in real Chromium and reads
@@ -201,6 +206,19 @@ straight line in decibels sags audibly in the middle.
 ```bash
 npx tsc src/lib/audio/automation.ts --target es2020 --module es2020 --skipLibCheck --outDir .tmp-check
 node scripts/automation-check.mjs
+```
+
+`scripts/denoise-check.mjs` runs a 440 Hz tone over white noise with half a
+second of noise alone at the start. Reduction of zero changes nothing, to
+-141 dBFS; asked for 18 dB, the noise-only stretch drops by 16.6 while the
+tone comes through within a hundredth of a decibel. The first version
+averaged gains linearly and delivered 14 dB for the same request, which is
+why they are now averaged in decibels.
+
+```bash
+npx tsc src/lib/audio/denoise.ts src/lib/audio/spectral.ts src/lib/audio/spectrogram.ts --target es2020 --module es2020 --skipLibCheck --outDir .tmp-check
+node scripts/fix-esm.mjs .tmp-check
+node scripts/denoise-check.mjs
 ```
 
 `scripts/ogg-check.mjs` holds the Ogg checksum to its published value and
