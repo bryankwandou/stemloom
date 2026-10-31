@@ -164,7 +164,7 @@ export async function encodeAac(
   return new Blob(chunks as BlobPart[], { type: "audio/aac" });
 }
 
-export type ExportFormat = "wav" | "aac";
+export type ExportFormat = "wav" | "aac" | "opus";
 
 export const FORMAT_INFO: Record<
   ExportFormat,
@@ -182,4 +182,146 @@ export const FORMAT_INFO: Record<
     lossless: false,
     note: "Compressed via the browser's own encoder. Roughly a tenth the size.",
   },
+  opus: {
+    label: "Opus",
+    ext: "opus",
+    lossless: false,
+    note: "Ogg Opus, an open codec with no licence attached. Always encoded at 48 kHz, whatever rate is chosen below.",
+  },
 };
+
+/* ------------------------------------------------------------------ */
+/* Opus in Ogg                                                         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Whether this browser's WebCodecs offers an Opus encoder. Checked rather
+ * than assumed: AudioEncoder existing says nothing about which codecs it
+ * was built with.
+ */
+export async function canEncodeOpus(): Promise<boolean> {
+  if (!canEncodeAac()) return false;
+  try {
+    const r = await AudioEncoder.isConfigSupported({
+      codec: "opus",
+      sampleRate: 48000,
+      numberOfChannels: 2,
+      bitrate: 128000,
+    });
+    return !!r.supported;
+  } catch {
+    return false;
+  }
+}
+
+/** Opus only runs at 48 kHz; anything else is resampled first. */
+async function to48k(buffer: AudioBuffer, channels: number): Promise<AudioBuffer> {
+  if (buffer.sampleRate === 48000 && buffer.numberOfChannels >= channels) return buffer;
+  const length = Math.ceil((buffer.length * 48000) / buffer.sampleRate);
+  const ctx = new OfflineAudioContext(channels, Math.max(1, length), 48000);
+  const src = ctx.createBufferSource();
+  src.buffer = buffer;
+  src.connect(ctx.destination);
+  src.start();
+  return ctx.startRendering();
+}
+
+/**
+ * libopus at 48 kHz looks 312 samples ahead, and that is what Chrome's
+ * encoder reports in the header it attaches to its first chunk. Read from
+ * there when it is present so a different build cannot drift the timing.
+ */
+const DEFAULT_PRE_SKIP = 312;
+
+export async function encodeOpus(
+  input: AudioBuffer,
+  opts: AacOptions = {},
+): Promise<Blob> {
+  const { muxOggOpus, OPUS_RATE } = await import("./ogg");
+  const channels = opts.channels ?? Math.min(2, input.numberOfChannels);
+  const bitrate = Math.min(510000, opts.bitrate ?? 160000);
+  const buffer = await to48k(input, channels);
+
+  const packets: { data: Uint8Array; samples: number }[] = [];
+  let preSkip = DEFAULT_PRE_SKIP;
+  let failure: Error | null = null;
+
+  const encoder = new AudioEncoder({
+    output: (chunk, meta) => {
+      const desc = meta?.decoderConfig?.description;
+      if (desc && packets.length === 0) {
+        const bytes = ArrayBuffer.isView(desc)
+          ? new Uint8Array(desc.buffer, desc.byteOffset, desc.byteLength)
+          : new Uint8Array(desc);
+        // An OpusHead: "OpusHead", version, channels, then pre-skip.
+        if (bytes.length >= 12 && String.fromCharCode(...bytes.slice(0, 8)) === "OpusHead") {
+          preSkip = bytes[10] | (bytes[11] << 8);
+        }
+      }
+      const data = new Uint8Array(chunk.byteLength);
+      chunk.copyTo(data);
+      const samples = Math.round(((chunk.duration ?? 20000) * OPUS_RATE) / 1e6);
+      packets.push({ data, samples });
+    },
+    error: (e) => {
+      failure = e instanceof Error ? e : new Error(String(e));
+    },
+  });
+
+  encoder.configure({
+    codec: "opus",
+    sampleRate: OPUS_RATE,
+    numberOfChannels: channels,
+    bitrate,
+  });
+
+  // Twenty milliseconds, Opus's own default frame.
+  const FRAME = 960;
+  const total = buffer.length;
+  const interleaved = new Float32Array(FRAME * channels);
+
+  for (let pos = 0; pos < total; pos += FRAME) {
+    if (failure) break;
+    const count = Math.min(FRAME, total - pos);
+    for (let c = 0; c < channels; c++) {
+      const src = buffer.getChannelData(Math.min(c, buffer.numberOfChannels - 1));
+      for (let i = 0; i < count; i++) interleaved[i * channels + c] = src[pos + i];
+    }
+    if (count < FRAME) interleaved.fill(0, count * channels);
+
+    const data = new AudioData({
+      format: "f32",
+      sampleRate: OPUS_RATE,
+      numberOfFrames: FRAME,
+      numberOfChannels: channels,
+      timestamp: Math.round((pos / OPUS_RATE) * 1e6),
+      data: interleaved,
+    });
+    encoder.encode(data);
+    data.close();
+    opts.onProgress?.(pos / total);
+
+    if (encoder.encodeQueueSize > 16) {
+      await new Promise<void>((resolve) => {
+        const check = () => {
+          if (encoder.encodeQueueSize <= 4) resolve();
+          else setTimeout(check, 4);
+        };
+        check();
+      });
+    }
+  }
+
+  await encoder.flush();
+  encoder.close();
+  if (failure) throw failure;
+
+  const pages = muxOggOpus(packets, {
+    channels,
+    preSkip,
+    inputRate: input.sampleRate,
+    totalSamples: total,
+  });
+  opts.onProgress?.(1);
+  return new Blob(pages as BlobPart[], { type: "audio/ogg" });
+}

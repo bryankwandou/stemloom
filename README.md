@@ -43,6 +43,8 @@ Stemloom aims at the gap: multitrack, offline, and unrestricted.
   transport does
 - WAV export at 16, 24, or 32-bit float, at 44.1k / 48k / 96k, mono or stereo
 - AAC export through WebCodecs with hand-written ADTS framing
+- Opus export through WebCodecs in a hand-written Ogg container, trimmed so
+  the file decodes to exactly the length of the mix
 - Triangular dither on fixed-point export
 - Loudness measurement to ITU-R BS.1770-4: integrated LUFS, loudness range,
   and inter-sample true peak, against Spotify, Apple, EBU R128, and CD targets
@@ -56,7 +58,8 @@ Stemloom aims at the gap: multitrack, offline, and unrestricted.
 
 Listing these honestly is more useful than hiding them.
 
-- MP3 and Ogg encoding
+- MP3 encoding. No browser exposes an MP3 encoder, so it would mean
+  writing one or adding a dependency; Opus and AAC cover the same need
 - MIDI, instruments, or anything that generates notes rather than editing them
 - An Android build
 
@@ -77,6 +80,7 @@ Everything in `src/lib/audio` is plain TypeScript with no audio dependencies.
 | `recorder.ts` | Input capture through an AudioWorklet |
 | `spectrogram.ts` | Radix-2 FFT, short-time transform, and the display ramp |
 | `spectral.ts` | The same transform run backwards, for repairing a band over a range |
+| `ogg.ts` | Ogg pages, checksums, and the two Opus headers, written to RFC 3533 and RFC 7845 |
 | `automation.ts` | Volume and pan envelopes, and the one scheduler both playback and export use |
 
 A few decisions worth calling out:
@@ -131,7 +135,7 @@ Then open `http://localhost:3000`.
 ## Verification
 
 A green TypeScript build says nothing about whether a microphone opens, an
-encoder emits a valid bitstream, or a canvas has any pixels on it. Four
+encoder emits a valid bitstream, or a canvas has any pixels on it. Five
 suites cover that, and all of them are meant to be run by hand.
 
 `scripts/browser-check.mjs` drives the real page in real Chromium and reads
@@ -197,6 +201,19 @@ straight line in decibels sags audibly in the middle.
 ```bash
 npx tsc src/lib/audio/automation.ts --target es2020 --module es2020 --skipLibCheck --outDir .tmp-check
 node scripts/automation-check.mjs
+```
+
+`scripts/ogg-check.mjs` holds the Ogg checksum to its published value and
+then reads the muxer's output back the way a player does: every page's
+checksum verified, packets of 255 and 510 bytes reassembled byte for byte,
+and the last page's granule set so the encoder's padding is cut off. The
+browser suite then decodes a real Opus export twice, once in Chrome and
+once in ffmpeg when it is installed, and holds it to the length of the WAV
+export of the same mix.
+
+```bash
+npx tsc src/lib/audio/ogg.ts --target es2020 --module es2020 --skipLibCheck --outDir .tmp-check
+node scripts/ogg-check.mjs
 ```
 
 ## On the subject of other people's software

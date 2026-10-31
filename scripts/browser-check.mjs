@@ -20,6 +20,7 @@
  */
 
 import { readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
 // Resolved at run time rather than imported at the top, so PLAYWRIGHT can
@@ -38,6 +39,8 @@ const BASE = process.env.BASE ?? "https://stemloom.vercel.app";
 const OUT = process.env.OUT ?? ".";
 
 const results = [];
+/** Length of the WAV export, the reference every lossy export is held to. */
+let wavSeconds = null;
 let page, ctx, browser;
 
 function record(name, ok, detail = "") {
@@ -456,6 +459,8 @@ async function main() {
       if (buf.readInt16LE(i) !== 0) nonZero++;
     }
     assert(nonZero > 500, `only ${nonZero} non-zero samples — exported silence`);
+    // Kept for the Opus check, which has to come out the same length.
+    wavSeconds = (buf.length - 44) / buf.readUInt32LE(28);
     return `${(buf.length / 1024).toFixed(0)} KB, ${nonZero} non-zero samples checked`;
   });
 
@@ -505,6 +510,60 @@ async function main() {
     assert(frameLen > 7 && frameLen < 8192, `implausible frame length ${frameLen}`);
     assert(buf[frameLen] === 0xff, "second frame does not start where the first says it ends");
     return `${(buf.length / 1024).toFixed(0)} KB, first frame ${frameLen} bytes, chain intact`;
+  });
+
+  await check("Opus export decodes, in Chrome and in ffmpeg, to the right length", async () => {
+    await page.click("button:has-text('Export')");
+    await page.waitForSelector("text=Export mixdown", { timeout: 10000 });
+    const opus = page.locator("button:has-text('Opus')").first();
+    assert(await opus.count(), "no Opus option in the export dialog");
+    await opus.click();
+    await page.waitForTimeout(400);
+    const [dl] = await Promise.all([
+      page.waitForEvent("download", { timeout: 90000 }),
+      page.click("button:has-text('Render Opus')"),
+    ]);
+    const path = await dl.path();
+    const buf = readFileSync(path);
+    assert(buf.toString("ascii", 0, 4) === "OggS", "no Ogg capture pattern");
+    assert(buf.toString("ascii", 28, 36) === "OpusHead", "first packet is not OpusHead");
+
+    // Chrome's own decoder rejects a stream with a bad checksum or broken
+    // lacing, so decoding it at all is a strong check; the length then
+    // shows whether the pre-skip and final granule were honoured.
+    const decoded = await page.evaluate(async (bytes) => {
+      const ctx = new OfflineAudioContext(2, 1, 48000);
+      const ab = new Uint8Array(bytes).buffer;
+      const b = await ctx.decodeAudioData(ab);
+      let peak = 0;
+      const d = b.getChannelData(0);
+      for (let i = 0; i < d.length; i += 7) peak = Math.max(peak, Math.abs(d[i]));
+      return { seconds: b.duration, rate: b.sampleRate, peak };
+    }, [...buf]);
+    assert(decoded.peak > 0.01, `decoded to near silence (peak ${decoded.peak})`);
+    const drift = wavSeconds === null ? null : Math.abs(decoded.seconds - wavSeconds);
+    assert(drift === null || drift < 0.03,
+      `decodes to ${decoded.seconds.toFixed(3)} s against the WAV's ${wavSeconds?.toFixed(3)} s`);
+
+    // An independent decoder, when one is installed. Chrome agreeing with
+    // itself would not catch a stream only Chrome is lenient about.
+    let ff = "ffmpeg not installed";
+    try {
+      const out = execFileSync("ffprobe", [
+        "-v", "error", "-show_entries", "stream=codec_name,sample_rate,channels:format=duration",
+        "-of", "default=nw=1", path,
+      ]).toString();
+      const err = execFileSync("ffmpeg", ["-v", "error", "-i", path, "-f", "null", "-"], {
+        stdio: ["ignore", "pipe", "pipe"],
+      }).toString();
+      assert(/codec_name=opus/.test(out), `ffprobe saw: ${out.replace(/\s+/g, " ")}`);
+      assert(err.trim() === "", `ffmpeg reported: ${err.slice(0, 120)}`);
+      const dur = Number(out.match(/duration=([\d.]+)/)?.[1]);
+      ff = `ffmpeg decodes it cleanly, ${dur.toFixed(3)} s`;
+    } catch (e) {
+      if (e.code !== "ENOENT") throw e;
+    }
+    return `${(buf.length / 1024).toFixed(0)} KB, Chrome ${decoded.seconds.toFixed(3)} s vs WAV ${wavSeconds?.toFixed(3)} s; ${ff}`;
   });
 
   await check("export dialog closes", async () => {

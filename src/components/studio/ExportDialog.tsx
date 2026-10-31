@@ -17,7 +17,9 @@ import type { EffectInstance } from "@/lib/audio/effects";
 import { encodeWav, type BitDepth } from "@/lib/audio/wav";
 import {
   canEncodeAac,
+  canEncodeOpus,
   encodeAac,
+  encodeOpus,
   FORMAT_INFO,
   type ExportFormat,
 } from "@/lib/audio/encode";
@@ -100,6 +102,16 @@ export function ExportDialog({
     if (!aacAvailable.current && format === "aac") setFormat("wav");
   }, [format]);
 
+  // Asked of the encoder itself: a browser can have WebCodecs without Opus.
+  const [opusAvailable, setOpusAvailable] = useState(false);
+  useEffect(() => {
+    let live = true;
+    canEncodeOpus().then((ok) => live && setOpusAvailable(ok));
+    return () => {
+      live = false;
+    };
+  }, []);
+
   /** Render once and measure. Deliberately manual — it is not cheap. */
   const analyse = useCallback(async () => {
     if (!tracks.length) return;
@@ -118,10 +130,20 @@ export function ExportDialog({
     if (!tracks.length) return;
     setWorking("Rendering the mix");
     try {
-      const mix = await bounce(tracks, masterChain, masterDb, rate);
+      // Opus runs at 48 kHz internally, so rendering anywhere else would only
+      // add a resample.
+      const mix = await bounce(
+        tracks,
+        masterChain,
+        masterDb,
+        format === "opus" ? 48000 : rate,
+      );
 
       let blob: Blob;
-      if (format === "aac") {
+      if (format === "opus") {
+        setWorking("Encoding Opus");
+        blob = await encodeOpus(mix, { bitrate, channels: chans });
+      } else if (format === "aac") {
         setWorking("Encoding AAC");
         blob = await encodeAac(mix, { bitrate, channels: chans });
       } else {
@@ -170,11 +192,16 @@ export function ExportDialog({
               options={[
                 { v: "wav" as ExportFormat, l: "WAV" },
                 { v: "aac" as ExportFormat, l: "AAC" },
+                { v: "opus" as ExportFormat, l: "Opus" },
               ]}
               value={format}
               onChange={(v) => {
                 if (v === "aac" && !aacAvailable.current) {
                   onStatus("This browser has no AAC encoder. WAV still works.");
+                  return;
+                }
+                if (v === "opus" && !opusAvailable) {
+                  onStatus("This browser has no Opus encoder. WAV still works.");
                   return;
                 }
                 setFormat(v);
