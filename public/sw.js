@@ -14,7 +14,15 @@
 
 // Bumped when a cached file changes shape, such as the recorder worklet
 // learning to acknowledge a stop.
-const CACHE = "stemloom-v3";
+const CACHE = "stemloom-v4";
+
+// The pages the app needs to open offline, kept apart from everything
+// cached at run time. Written once at install and never touched again
+// while the app runs: an offline fallback read from a cache that is also
+// being rewritten underneath it can find the entry missing at exactly the
+// wrong moment, which is what the offline check kept catching on the first
+// visit after a deploy.
+const SHELL = "stemloom-shell-v4";
 
 // The shell we want available before the user ever goes offline.
 const PRECACHE = ["/", "/studio", "/manifest.webmanifest", "/icon.svg"];
@@ -22,7 +30,7 @@ const PRECACHE = ["/", "/studio", "/manifest.webmanifest", "/icon.svg"];
 self.addEventListener("install", (event) => {
   event.waitUntil(
     caches
-      .open(CACHE)
+      .open(SHELL)
       // Individually, so one miss cannot fail the whole install.
       .then((c) => Promise.allSettled(PRECACHE.map((u) => c.add(u))))
       .then(() => self.skipWaiting()),
@@ -34,7 +42,9 @@ self.addEventListener("activate", (event) => {
     caches
       .keys()
       .then((keys) =>
-        Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))),
+        Promise.all(
+          keys.filter((k) => k !== CACHE && k !== SHELL).map((k) => caches.delete(k)),
+        ),
       )
       .then(() => self.clients.claim()),
   );
@@ -54,13 +64,15 @@ self.addEventListener("fetch", (event) => {
     event.respondWith(
       fetch(req)
         .then((res) => {
-          const copy = res.clone();
-          caches.open(CACHE).then((c) => c.put(req, copy));
+          // Only a good page is worth keeping; a 500 cached here would be
+          // what the user sees the next time they are offline.
+          if (res.ok) {
+            const copy = res.clone();
+            caches.open(CACHE).then((c) => c.put(req, copy));
+          }
           return res;
         })
-        .catch(() =>
-          caches.match(req).then((hit) => hit || caches.match("/studio")),
-        ),
+        .catch(() => offlinePage(req)),
     );
     return;
   }
@@ -84,6 +96,20 @@ self.addEventListener("fetch", (event) => {
     }),
   );
 });
+
+/**
+ * The page to show for a navigation with no network: the latest copy of
+ * that page if there is one, else the shell. Vary is ignored because Next
+ * marks pages as varying on its router headers, which a plain navigation
+ * never carries the same way twice.
+ */
+function offlinePage(req) {
+  const loose = { ignoreVary: true };
+  return caches
+    .match(req, loose)
+    .then((hit) => hit || caches.open(SHELL).then((c) => c.match(new URL(req.url).pathname, loose)))
+    .then((hit) => hit || caches.open(SHELL).then((c) => c.match("/studio", loose)));
+}
 
 /**
  * A copy of a cached response with no URL of its own.
